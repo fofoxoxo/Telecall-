@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
 import path from 'path';
 import crypto from 'crypto';
+import { createDcMediaBridgeRouter } from './src/backend/index';
 
 export interface VoiceParticipant {
   id: string;
@@ -271,7 +272,8 @@ function computeDhEmojiFingerprint(callerId: string, calleeId: string, secretSal
 async function startServer() {
   const app = express();
   const PORT = 3000;
-  app.use(express.json());
+  app.use(express.json({ limit: '25mb' }));
+  app.use('/api/dc-media', createDcMediaBridgeRouter());
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
