@@ -1,93 +1,53 @@
-name: TeleCall Android WebView & Dev APK Builder
+name: Deploy Webview Preview (GitHub Pages)
 
 on:
   push:
     branches:
-      - main
-      - dev
-  pull_request:
-    branches:
-      - main
       - dev
   workflow_dispatch:
-    inputs:
-      webview_url:
-        description: 'Live Server / WebView URL for WebView APK'
-        required: false
-        default: 'https://ais-pre-xfn5k5hyj4aiqlwlaul5tn-771261258696.asia-southeast1.run.app'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
 
 jobs:
-  build-webview-and-dev-apk:
-    name: Build WebView APK & Dev APK
+  deploy-webview-preview:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 22 (No Lockfile Required)
+      - name: Setup Node.js 22.x
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '22.x'
 
-      - name: Setup Java JDK 17
-        uses: actions/setup-java@v4
+      - name: Install Dependencies
+        run: |
+          npm install --legacy-peer-deps --no-audit --no-fund
+
+      - name: Build Web Application for GitHub Pages
+        run: |
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          echo "Building with VITE_BASE=/${REPO_NAME}/"
+          export VITE_BASE="/${REPO_NAME}/"
+          npm run build
+          touch dist/.nojekyll
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          path: './dist'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NPM Dependencies
-        run: npm install --legacy-peer-deps
-
-      - name: Build Frontend Bundle (Vite)
-        env:
-          VITE_TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          VITE_TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          VITE_WEBVIEW_SERVER_URL: ${{ github.event.inputs.webview_url || secrets.WEBVIEW_SERVER_URL || 'https://ais-pre-xfn5k5hyj4aiqlwlaul5tn-771261258696.asia-southeast1.run.app' }}
-        run: npm run build
-
-      - name: Initialize Capacitor Android Project
-        run: |
-          if [ ! -d "android" ]; then
-            npx cap add android
-          fi
-
-      - name: Inject Android Audio, Microphone & Contact Permissions
-        run: |
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST" ] && ! grep -q "android.permission.RECORD_AUDIO" "$MANIFEST"; then
-            sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <uses-permission android:name="android.permission.BLUETOOTH" />\n    <uses-permission android:name="android.permission.READ_CONTACTS" />' "$MANIFEST"
-          fi
-
-      - name: Build 1 — Standalone Dev APK (Bundled Assets)
-        env:
-          BUILD_ENV: 'dev'
-          WEBVIEW_SERVER_URL: ''
-        run: |
-          npx cap sync android
-          chmod +x android/gradlew
-          cd android && ./gradlew assembleDebug
-          cp app/build/outputs/apk/debug/app-debug.apk ../telecall-dev-debug.apk
-
-      - name: Build 2 — Live WebView APK (Connected to Live Server URL)
-        env:
-          BUILD_ENV: 'dev'
-          WEBVIEW_SERVER_URL: ${{ github.event.inputs.webview_url || secrets.WEBVIEW_SERVER_URL || 'https://ais-pre-xfn5k5hyj4aiqlwlaul5tn-771261258696.asia-southeast1.run.app' }}
-        run: |
-          npx cap sync android
-          cd android && ./gradlew assembleDebug
-          cp app/build/outputs/apk/debug/app-debug.apk ../telecall-webview-debug.apk
-
-      - name: Upload WebView & Dev APKs (Download on Phone)
-        uses: actions/upload-artifact@v4
-        with:
-          name: telecall-android-apks
-          path: |
-            telecall-dev-debug.apk
-            telecall-webview-debug.apk
-          retention-days: 30
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
