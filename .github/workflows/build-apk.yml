@@ -1,0 +1,226 @@
+name: Build Android APK (Main Production & Dev Live Webview)
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  workflow_dispatch:
+    inputs:
+      webview_url:
+        description: 'Live Webview URL (Leave empty to auto-use GitHub Pages on dev)'
+        required: false
+        default: ''
+      build_type:
+        description: 'Choose build type (debug or release)'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Node.js (Latest LTS 22.x)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+
+      - name: Install Project Dependencies
+        run: |
+          npm install --legacy-peer-deps --no-audit --no-fund
+          npm install @capacitor/core@latest @capacitor/cli@latest @capacitor/android@latest @capacitor/status-bar@latest @capacitor/keyboard@latest --legacy-peer-deps --no-audit --no-fund
+
+      - name: Build Web Application (Bundled Offline Assets)
+        run: |
+          npm run build
+
+      - name: Configure Capacitor & Android Identifiers
+        run: |
+          REF_NAME="${{ github.ref_name }}"
+          REF="${{ github.ref }}"
+          MANUAL_URL="${{ github.event.inputs.webview_url }}"
+          
+          echo "Branch detection: ref_name=$REF_NAME, ref=$REF"
+
+          if [ "$REF_NAME" = "main" ] || [ "$REF_NAME" = "master" ]; then
+            IS_DEV=false
+          else
+            IS_DEV=true
+          fi
+
+          if [ "$IS_DEV" = true ]; then
+            REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+            REPO_OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+
+            if [ -n "$MANUAL_URL" ]; then
+              TARGET_URL="$MANUAL_URL"
+            else
+              TARGET_URL="https://${REPO_OWNER}.github.io/${REPO_NAME}/"
+            fi
+
+            echo "⚡ BUILDING DEV APK pointing to: $TARGET_URL"
+            cat << EOF > capacitor.config.json
+          {
+            "appId": "com.telenotes.dev",
+            "appName": "Telenotes Dev",
+            "webDir": "dist",
+            "server": {
+              "url": "$TARGET_URL",
+              "cleartext": true,
+              "errorPath": "index.html",
+              "androidScheme": "https",
+              "allowNavigation": ["*"]
+            },
+            "android": {
+              "allowMixedContent": true,
+              "captureInput": true,
+              "webContentsDebuggingEnabled": true,
+              "backgroundColor": "#020617"
+            },
+            "plugins": {
+              "StatusBar": {
+                "overlaysWebView": true,
+                "style": "DARK",
+                "backgroundColor": "#00000000"
+              },
+              "NavigationBar": {
+                "displaysInLowProfile": false,
+                "backgroundColor": "#00000000"
+              }
+            }
+          }
+          EOF
+            if [ -f "android/app/build.gradle" ]; then
+              sed -i 's/applicationId "com.telenotes.app"/applicationId "com.telenotes.dev"/g' android/app/build.gradle
+            fi
+            echo "ARTIFACT_NAME=telenotes-dev-apk" >> $GITHUB_ENV
+            echo "APK_PREFIX=telenotes-dev" >> $GITHUB_ENV
+          else
+            echo "📦 BUILDING PRODUCTION 100% OFFLINE BUNDLED APK"
+            cat << EOF > capacitor.config.json
+          {
+            "appId": "com.telenotes.app",
+            "appName": "Telenotes",
+            "webDir": "dist",
+            "server": {
+              "androidScheme": "https"
+            },
+            "android": {
+              "allowMixedContent": true,
+              "backgroundColor": "#020617"
+            },
+            "plugins": {
+              "StatusBar": {
+                "overlaysWebView": true,
+                "style": "DARK",
+                "backgroundColor": "#00000000"
+              },
+              "NavigationBar": {
+                "displaysInLowProfile": false,
+                "backgroundColor": "#00000000"
+              }
+            }
+          }
+          EOF
+            if [ -f "android/app/build.gradle" ]; then
+              sed -i 's/applicationId "com.telenotes.dev"/applicationId "com.telenotes.app"/g' android/app/build.gradle
+            fi
+            echo "ARTIFACT_NAME=telenotes-production-apk" >> $GITHUB_ENV
+            echo "APK_PREFIX=telenotes-production" >> $GITHUB_ENV
+          fi
+
+      - name: Setup Android Platform & Enforce Edge-to-Edge Full Screen
+        run: |
+          if [ ! -d "android/app" ]; then
+            echo "Generating Android native project..."
+            npx cap add android
+          fi
+          npx cap sync android
+
+          # Ensure Gradle wrapper exists
+          if [ ! -f "android/gradlew" ]; then
+            echo "Creating gradle wrapper..."
+            cd android
+            gradle wrapper --gradle-version 8.7 || gradle wrapper || true
+            cd ..
+          fi
+          chmod +x android/gradlew || true
+
+          # Inject and enforce Edge-to-Edge full screen in MainActivity.java
+          MAIN_ACTIVITY="android/app/src/main/java/com/telenotes/app/MainActivity.java"
+          if [ -f "$MAIN_ACTIVITY" ]; then
+            if ! grep -q "WindowCompat.setDecorFitsSystemWindows" "$MAIN_ACTIVITY"; then
+              echo "Injecting WindowCompat into MainActivity.java..."
+              sed -i '/super.onCreate(savedInstanceState);/a \        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(getWindow(), false);' "$MAIN_ACTIVITY"
+            fi
+          fi
+
+          # Enforce transparent status bar in styles.xml
+          STYLES_XML="android/app/src/main/res/values/styles.xml"
+          if [ -f "$STYLES_XML" ]; then
+            sed -i 's/<item name="android:statusBarColor">.*<\/item>/<item name="android:statusBarColor">@android:color\/transparent<\/item>/g' "$STYLES_XML"
+            sed -i 's/<item name="android:navigationBarColor">.*<\/item>/<item name="android:navigationBarColor">@android:color\/transparent<\/item>/g' "$STYLES_XML"
+          fi
+
+      - name: Build Android Debug APK
+        if: "${{ github.event.inputs.build_type != 'release' }}"
+        run: |
+          cd android
+          ./gradlew assembleDebug --no-daemon --stacktrace
+          cd ..
+          find android/app/build/outputs/apk/debug -name "*.apk" -exec cp {} android/app/build/outputs/apk/debug/${{ env.APK_PREFIX }}-debug.apk \;
+
+      - name: Upload Debug APK Artifact
+        if: "${{ github.event.inputs.build_type != 'release' }}"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: android/app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+
+      - name: Build Android Release APK
+        if: "${{ github.event.inputs.build_type == 'release' }}"
+        run: |
+          cd android
+          ./gradlew assembleRelease --no-daemon --stacktrace
+          cd ..
+
+      - name: Sign Release APK with Keystore Secret
+        if: "${{ github.event.inputs.build_type == 'release' && env.KEYSTORE_AVAILABLE == 'true' }}"
+        env:
+          KEYSTORE_AVAILABLE: ${{ secrets.KEYSTORE_BASE64 != '' }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/release.keystore
+          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -n 1)
+          UNSIGNED_APK=$(find android/app/build/outputs/apk/release -name "*unsigned.apk" -o -name "*release*.apk" | head -n 1)
+          $BUILD_TOOLS_DIR/apksigner sign --ks android/release.keystore --ks-pass pass:"$KEYSTORE_PASSWORD" --key-pass pass:"$KEY_PASSWORD" --ks-key-alias "$KEY_ALIAS" --out android/app/build/outputs/apk/release/telenotes-release-signed.apk "$UNSIGNED_APK"
+          echo "Signed APK created successfully!"
+
+      - name: Upload Release APK Artifact
+        if: "${{ github.event.inputs.build_type == 'release' }}"
+        uses: actions/upload-artifact@v4
+        with:
+          name: telenotes-release-apk
+          path: android/app/build/outputs/apk/release/*.apk
+          retention-days: 30
