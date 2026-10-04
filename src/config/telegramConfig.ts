@@ -1,9 +1,10 @@
 /**
- * TELEGRAM API CREDENTIALS & MULTI-DC CONFIGURATION
- * =================================================
- * GitHub ya local project me aapko sirf is ek file (`src/config/telegramConfig.ts`)
- * me apna `API_ID` aur `API_HASH` insert karna hai.
- * Client-side aur Server-side (`src/backend/*`) dono services isi file se credentials read karti hain.
+ * TELEGRAM API CREDENTIALS & MULTI-DC CONFIGURATION (SECRETS-DRIVEN)
+ * ==================================================================
+ * Security Notice: Raw API_ID and API_HASH are NEVER hardcoded in source code.
+ * They are loaded automatically from Environment Variables / GitHub Actions Secrets:
+ * - Server-Side: `process.env.TELEGRAM_API_ID` & `process.env.TELEGRAM_API_HASH`
+ * - Client-Side (Vite Build): `import.meta.env.VITE_TELEGRAM_API_ID` & `import.meta.env.VITE_TELEGRAM_API_HASH`
  */
 
 export interface DataCenterEndpoint {
@@ -22,28 +23,26 @@ export const TELEGRAM_DC_MAP: Record<number, DataCenterEndpoint> = {
 };
 
 const envApiId =
-  (typeof process !== 'undefined' && process.env?.TELEGRAM_API_ID) ||
+  (typeof process !== 'undefined' && (process.env?.TELEGRAM_API_ID || process.env?.VITE_TELEGRAM_API_ID)) ||
   (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_TELEGRAM_API_ID);
 
 const envApiHash =
-  (typeof process !== 'undefined' && process.env?.TELEGRAM_API_HASH) ||
+  (typeof process !== 'undefined' && (process.env?.TELEGRAM_API_HASH || process.env?.VITE_TELEGRAM_API_HASH)) ||
   (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_TELEGRAM_API_HASH);
 
 export const TELEGRAM_CONFIG = {
-  // 👇 YAHAN APNA TELEGRAM API_ID (Number) INSERT KAREIN 👇
-  API_ID: Number(envApiId) || 30428833,
+  // Loaded strictly from GitHub Secrets / Environment Variables (No raw keys in code)
+  API_ID: Number(envApiId) || 0,
+  API_HASH: String(envApiHash || ''),
 
-  // 👇 YAHAN APNA TELEGRAM API_HASH (32-char String) INSERT KAREIN 👇
-  API_HASH: String(envApiHash || '41c474aebd7507799bd322e7517286c2'),
-
-  // Default Telegram Production Data Center (DC5 Singapore / India ya DC4 Amsterdam)
+  // Default Telegram Production Data Center (DC5 Singapore / India)
   DEFAULT_DC_ID: 5 as 1 | 2 | 3 | 4 | 5,
   APP_VERSION: '1.0.0',
   DEVICE_MODEL: 'Android TeleCall Client',
   SYSTEM_VERSION: 'Android 14',
   LANG_CODE: 'en',
 
-  // Media Streaming Chunk Constants (non-blocking 256KB / 512KB MTProto chunks)
+  // Media Streaming Chunk Constants (non-blocking 256KB MTProto chunks)
   STREAM_CHUNK_SIZE_BYTES: 256 * 1024,
   MAX_CONCURRENT_DC_WORKERS: 4,
 };

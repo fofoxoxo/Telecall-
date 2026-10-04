@@ -47,6 +47,19 @@ export {
   handleSfuSignalingMessage,
   createSfuRouter,
 } from './sfuSignalingGateway';
+export {
+  fcmPushService,
+  FcmPushService,
+} from './fcmPushService';
+export type {
+  FcmDeviceTokenRecord,
+  IncomingCallPushPayload,
+} from './fcmPushService';
+export {
+  realtimeSocketGateway,
+  RealtimeSocketGateway,
+  createFcmNotificationsRouter,
+} from './socketIoGateway';
 
 /**
  * Step 2.4: Clean Modular Express Bridge Router (`/api/dc-media/*`)

@@ -1,5 +1,7 @@
 import { TELEGRAM_CONFIG } from '../config/telegramConfig';
 
+export type AuthDeliveryMethod = 'telegram_app' | 'sms' | 'phone_call' | 'email';
+
 export interface MTProtoSessionData {
   dcId: number;
   authKeyHex: string;
@@ -8,6 +10,9 @@ export interface MTProtoSessionData {
   phone: string;
   name: string;
   username: string;
+  bio?: string;
+  email?: string;
+  twoFactorEnabled?: boolean;
   createdAt: number;
 }
 
@@ -161,15 +166,33 @@ export class ClientMTProtoEngine {
   }
 
   /**
-   * Step 1 of Telegram Login: `auth.sendCode`
+   * Step 1 of Telegram Login / Registration: `auth.sendCode` / `auth.resendCode`
+   * Supports delivery via: Telegram App ('telegram_app'), SMS ('sms'), Phone Call ('phone_call'), or Email ('email')
    */
-  public async sendAuthCode(phone: string): Promise<{ ok: boolean; phoneCodeHash?: string; error?: string }> {
+  public async sendAuthCode(
+    phone: string,
+    options?: {
+      deliveryMethod?: AuthDeliveryMethod;
+      email?: string;
+      isNewUser?: boolean;
+    }
+  ): Promise<{
+    ok: boolean;
+    phoneCodeHash?: string;
+    deliveryMethod?: AuthDeliveryMethod;
+    error?: string;
+  }> {
+    const method: AuthDeliveryMethod =
+      options?.deliveryMethod || (options?.isNewUser ? 'sms' : 'telegram_app');
     try {
       const res = await fetch('/api/auth/send-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           phone: phone.trim(),
+          email: options?.email?.trim(),
+          deliveryMethod: method,
+          isNewUser: options?.isNewUser,
           apiId: TELEGRAM_CONFIG.API_ID,
           apiHash: TELEGRAM_CONFIG.API_HASH,
         }),
@@ -177,21 +200,31 @@ export class ClientMTProtoEngine {
       if (!res.ok) throw new Error('Static host fallback');
       return await res.json();
     } catch {
-      // Client-side MTProto fallback when hosted on static GitHub Pages WebView
-      const hash = btoa(`${phone.trim()}:${TELEGRAM_CONFIG.API_ID}`).slice(0, 18);
-      return { ok: true, phoneCodeHash: hash };
+      const hash = btoa(`${phone.trim()}:${TELEGRAM_CONFIG.API_ID}:${method}`).slice(0, 18);
+      return { ok: true, phoneCodeHash: hash, deliveryMethod: method };
     }
   }
 
   /**
-   * Step 2 of Telegram Login / Registration: `auth.signIn` + Persist `StringSession`
+   * Step 2 of Telegram Login / Registration: `auth.signIn`, `auth.checkPassword` (2FA), or `auth.signUp`
    */
   public async verifyAuthCode(params: {
     phone: string;
     code: string;
     phoneCodeHash: string;
     name: string;
-  }): Promise<{ ok: boolean; sessionData?: MTProtoSessionData; error?: string }> {
+    lastName?: string;
+    bio?: string;
+    email?: string;
+    twoFactorPassword?: string;
+    require2FA?: boolean;
+  }): Promise<{
+    ok: boolean;
+    requires2FA?: boolean;
+    passwordHint?: string;
+    sessionData?: MTProtoSessionData;
+    error?: string;
+  }> {
     try {
       const res = await fetch('/api/auth/verify-code', {
         method: 'POST',
@@ -201,13 +234,26 @@ export class ClientMTProtoEngine {
           code: params.code.trim(),
           phoneCodeHash: params.phoneCodeHash,
           name: params.name.trim(),
+          lastName: params.lastName?.trim(),
+          bio: params.bio?.trim(),
+          email: params.email?.trim(),
+          twoFactorPassword: params.twoFactorPassword,
+          require2FA: params.require2FA,
           apiId: TELEGRAM_CONFIG.API_ID,
         }),
       });
       if (!res.ok) throw new Error('Static host fallback');
       const data = await res.json();
+      if (data.requires2FA) {
+        return {
+          ok: false,
+          requires2FA: true,
+          passwordHint: data.passwordHint || 'Telegram Cloud Password',
+          error: data.error,
+        };
+      }
       if (!data.ok) {
-        return { ok: false, error: data.error || 'Invalid code.' };
+        return { ok: false, error: data.error || 'Invalid verification code.' };
       }
 
       const sessionData: MTProtoSessionData = {
@@ -218,25 +264,47 @@ export class ClientMTProtoEngine {
         phone: data.user.phone,
         name: data.user.name,
         username: data.user.username,
+        bio: data.user.bio || 'Available on TeleCall',
+        email: data.user.email,
+        twoFactorEnabled: Boolean(data.user.twoFactorEnabled),
         createdAt: Date.now(),
       };
 
       this.session.save(sessionData);
       return { ok: true, sessionData };
     } catch {
+      if (params.require2FA && !params.twoFactorPassword) {
+        return {
+          ok: false,
+          requires2FA: true,
+          passwordHint: 'Telegram Cloud Password',
+        };
+      }
+      const fullName = [params.name.trim(), params.lastName?.trim()].filter(Boolean).join(' ') || 'TeleCall User';
       const sessionData: MTProtoSessionData = {
         dcId: TELEGRAM_CONFIG.DEFAULT_DC_ID,
         authKeyHex: btoa(params.phone + ':' + Date.now()),
         serverSalt: '7f3a9c1e5b2d8f4a',
         userId: 'tg-user-' + btoa(params.phone).slice(0, 8),
         phone: params.phone.trim(),
-        name: params.name.trim() || 'TeleCall User',
-        username: '@' + (params.name.trim().toLowerCase().replace(/[^a-z0-9]/g, '_') || 'telecall_user'),
+        name: fullName,
+        username: '@' + (fullName.toLowerCase().replace(/[^a-z0-9]/g, '_') || 'telecall_user'),
+        bio: params.bio?.trim() || 'Available on TeleCall',
+        email: params.email?.trim(),
+        twoFactorEnabled: Boolean(params.twoFactorPassword || params.require2FA),
         createdAt: Date.now(),
       };
       this.session.save(sessionData);
       return { ok: true, sessionData };
     }
+  }
+
+  public updateSavedProfile(updates: Partial<MTProtoSessionData>): MTProtoSessionData | null {
+    const current = this.session.load();
+    if (!current) return null;
+    const updated: MTProtoSessionData = { ...current, ...updates };
+    this.session.save(updated);
+    return updated;
   }
 
   public logout(): void {

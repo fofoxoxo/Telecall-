@@ -7,6 +7,7 @@ import {
   Mic,
   MicOff,
   Users,
+  User,
   Search,
   Plus,
   Hand,
@@ -23,9 +24,19 @@ import {
   Delete,
   Globe,
   Link2,
-  BookOpen
+  BookOpen,
+  ShieldCheck,
+  Mail,
+  MessageSquare,
+  PhoneCall,
+  LogOut,
+  Edit3
 } from 'lucide-react';
-import { mtprotoEngine, MTProtoSessionData } from './services/mtprotoClient';
+import {
+  mtprotoEngine,
+  MTProtoSessionData,
+  AuthDeliveryMethod
+} from './services/mtprotoClient';
 
 interface VoiceParticipant {
   id: string;
@@ -92,6 +103,7 @@ const TOPICS = [
 ];
 
 const DIAL_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '0', '#'];
+const RECENT_ROOMS_STORAGE_KEY = 'telecall_recent_joined_room_ids';
 
 export default function App() {
   // Initialize MTProto Session from StringSession storage
@@ -99,35 +111,59 @@ export default function App() {
     mtprotoEngine.getSavedSession()
   );
 
-  // Login Flow States
+  // Telegram Auth Flow States (Existing User Login with OTP + 2FA OR New User Sign Up via SMS, Call, or Email OTP)
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
-  const [authStep, setAuthStep] = useState<'phone' | 'otp'>('phone');
+  const [authMode, setAuthMode] = useState<'existing_user' | 'new_user'>('existing_user');
+  const [authStep, setAuthStep] = useState<'phone' | 'otp' | '2fa'>('phone');
+  const [deliveryMethod, setDeliveryMethod] = useState<AuthDeliveryMethod>('telegram_app');
   const [phoneInput, setPhoneInput] = useState('+91 ');
-  const [nameInput, setNameInput] = useState('');
+  const [emailInput, setEmailInput] = useState('');
+  const [firstNameInput, setFirstNameInput] = useState('');
+  const [lastNameInput, setLastNameInput] = useState('');
   const [otpInput, setOtpInput] = useState('');
+  const [twoFactorEnabledToggle, setTwoFactorEnabledToggle] = useState(false);
+  const [twoFactorPassword, setTwoFactorPassword] = useState('');
   const [phoneCodeHash, setPhoneCodeHash] = useState('');
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
 
-  const currentUser = session || {
-    dcId: 4,
+  // Telegram Profile Edit States
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editUsername, setEditUsername] = useState('');
+  const [editBio, setEditBio] = useState('');
+
+  const currentUser: MTProtoSessionData = session || {
+    dcId: 5,
     authKeyHex: 'default',
     serverSalt: 'default',
     userId: 'tg-user-local',
     phone: '+91 98200 11223',
-    name: 'TeleCall User',
-    username: '@telecall_user',
+    name: 'Aarav Verma',
+    username: '@aarav_telecall',
+    bio: 'Available on TeleCall · Low-Latency Voice & Rooms',
+    twoFactorEnabled: true,
     createdAt: Date.now()
   };
 
-  // Bottom Navigation (Strictly 2 tabs: 'calls' and 'rooms')
-  const [activeBottomTab, setActiveBottomTab] = useState<'calls' | 'rooms'>('calls');
+  // Bottom Footer Navigation: Strictly 3 options ('calls' | 'rooms' | 'profile')
+  const [activeBottomTab, setActiveBottomTab] = useState<'calls' | 'rooms' | 'profile'>('calls');
 
-  // Floating Switcher above footer inside Calls tab: Call Logs, Contacts, Dialer
-  const [callsSubTab, setCallsSubTab] = useState<'logs' | 'contacts' | 'dialer'>('logs');
+  // Floating Switcher on Calls Page: Call Logs | Dialer | Contacts
+  const [callsSubTab, setCallsSubTab] = useState<'logs' | 'dialer' | 'contacts'>('logs');
   const [dialedNumber, setDialedNumber] = useState('+91 ');
 
-  // Data States (Initialized with built-in defaults so deployed GitHub Pages WebView works immediately even without Node backend)
+  // Recently Joined Room IDs (Shown in Voice Rooms Header strip + feed)
+  const [recentRoomIds, setRecentRoomIds] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem(RECENT_ROOMS_STORAGE_KEY);
+      return saved ? JSON.parse(saved) : ['room-upsc-101'];
+    } catch {
+      return ['room-upsc-101'];
+    }
+  });
+
+  // Data States
   const [rooms, setRooms] = useState<VoiceRoom[]>(() => {
     const saved = localStorage.getItem('telecall_rooms_cache');
     if (saved) {
@@ -209,6 +245,7 @@ export default function App() {
       }
     ];
   });
+
   const [contacts, setContacts] = useState<SyncedContact[]>([
     {
       id: 'contact-1',
@@ -235,6 +272,7 @@ export default function App() {
       lastSeen: 'In Voice Room'
     }
   ]);
+
   const [callLogs, setCallLogs] = useState<CallLogEntry[]>([
     {
       id: 'log-1',
@@ -288,23 +326,31 @@ export default function App() {
 
   const audioCtxRef = useRef<AudioContext | null>(null);
 
+  const recordRecentRoom = (roomId: string) => {
+    setRecentRoomIds((prev) => {
+      const next = [roomId, ...prev.filter((id) => id !== roomId)].slice(0, 8);
+      localStorage.setItem(RECENT_ROOMS_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
   useEffect(() => {
     mtprotoEngine.initPersistentConnection();
 
     const unsubEvents = mtprotoEngine.onServerEvent((event, payload) => {
       if (event === 'init') {
-        setRooms(payload.rooms || []);
-        setContacts(payload.contacts || []);
-        setCallLogs(payload.callLogs || []);
+        if (Array.isArray(payload.rooms) && payload.rooms.length > 0) {
+          setRooms(payload.rooms);
+        }
+        if (Array.isArray(payload.contacts)) setContacts(payload.contacts);
+        if (Array.isArray(payload.callLogs)) setCallLogs(payload.callLogs);
       } else if (event === 'room:created') {
         setRooms((prev) => {
           if (prev.some((r) => r.id === payload.id)) return prev;
           return [payload, ...prev];
         });
       } else if (event === 'room:updated') {
-        setRooms((prev) =>
-          prev.map((r) => (r.id === payload.id ? payload : r))
-        );
+        setRooms((prev) => prev.map((r) => (r.id === payload.id ? payload : r)));
       } else if (event === 'contacts:updated') {
         setContacts(payload || []);
       } else if (event === 'calllogs:updated') {
@@ -312,7 +358,7 @@ export default function App() {
       }
     });
 
-    // Check if user opened a private room invite link (?room=inviteCode)
+    // Check if user opened a group invite link (?room=inviteCode)
     const params = new URLSearchParams(window.location.search);
     const roomInviteParam = params.get('room');
     if (roomInviteParam) {
@@ -335,6 +381,7 @@ export default function App() {
                 ? prev.map((item) => (item.id === data.room.id ? data.room : item))
                 : [data.room, ...prev]
             );
+            recordRecentRoom(data.room.id);
             setJoinedRoomId(data.room.id);
           }
         })
@@ -396,6 +443,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           callerId: currentUser.userId,
+          callerName: currentUser.name,
           calleeId,
           contactName,
           phone
@@ -424,39 +472,109 @@ export default function App() {
     }
   };
 
-  const handleSendOtp = async (e: React.FormEvent) => {
+  // --- TELEGRAM LOGIN & NEW USER REGISTRATION HANDLERS ---
+
+  const openAuthModal = (mode: 'existing_user' | 'new_user' = 'existing_user') => {
+    setAuthMode(mode);
+    setAuthStep('phone');
+    setDeliveryMethod(mode === 'existing_user' ? 'telegram_app' : 'sms');
+    setAuthError('');
+    setShowAuthModal(true);
+  };
+
+  const handleSendOtp = async (e: React.FormEvent, customMethod?: AuthDeliveryMethod) => {
     e.preventDefault();
     setAuthError('');
+    const chosenMethod = customMethod || deliveryMethod;
+
+    if (chosenMethod === 'email' && !emailInput.trim()) {
+      setAuthError('Please enter your email address to receive the Telegram Email OTP.');
+      return;
+    }
+
     setAuthLoading(true);
-    const res = await mtprotoEngine.sendAuthCode(phoneInput);
+    const res = await mtprotoEngine.sendAuthCode(phoneInput, {
+      deliveryMethod: chosenMethod,
+      email: emailInput,
+      isNewUser: authMode === 'new_user'
+    });
     setAuthLoading(false);
+
     if (res.ok && res.phoneCodeHash) {
       setPhoneCodeHash(res.phoneCodeHash);
+      setDeliveryMethod(chosenMethod);
       setOtpInput('54921');
       setAuthStep('otp');
     } else {
-      setAuthError(res.error || 'Could not send verification code.');
+      setAuthError(res.error || 'Could not send Telegram verification code.');
     }
   };
 
-  const handleVerifyOtp = async (e: React.FormEvent) => {
+  const handleVerifyOtpOr2FA = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
+
+    // If user is on OTP step and has 2FA Cloud Password enabled, transition to 2FA step first
+    if (authStep === 'otp' && authMode === 'existing_user' && twoFactorEnabledToggle) {
+      setAuthStep('2fa');
+      return;
+    }
+
     setAuthLoading(true);
     const res = await mtprotoEngine.verifyAuthCode({
       phone: phoneInput,
       code: otpInput,
       phoneCodeHash,
-      name: nameInput || 'TeleCall User'
+      name:
+        authMode === 'new_user'
+          ? firstNameInput || 'TeleCall User'
+          : firstNameInput || currentUser.name,
+      lastName: lastNameInput,
+      email: emailInput || undefined,
+      twoFactorPassword: twoFactorPassword || undefined,
+      require2FA: twoFactorEnabledToggle
     });
     setAuthLoading(false);
+
+    if (res.requires2FA) {
+      setAuthStep('2fa');
+      return;
+    }
+
     if (res.ok && res.sessionData) {
       setSession(res.sessionData);
       setShowAuthModal(false);
       setAuthStep('phone');
+      setTwoFactorPassword('');
     } else {
       setAuthError(res.error || 'Verification failed.');
     }
+  };
+
+  const handleSaveProfileEdits = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanedUsername = editUsername.trim().startsWith('@')
+      ? editUsername.trim()
+      : `@${editUsername.trim().replace(/^@/, '')}`;
+
+    const updated = mtprotoEngine.updateSavedProfile({
+      name: editName.trim() || currentUser.name,
+      username: cleanedUsername || currentUser.username,
+      bio: editBio.trim()
+    });
+
+    if (updated) {
+      setSession(updated);
+    } else {
+      const nextSession: MTProtoSessionData = {
+        ...currentUser,
+        name: editName.trim() || currentUser.name,
+        username: cleanedUsername || currentUser.username,
+        bio: editBio.trim()
+      };
+      setSession(nextSession);
+    }
+    setIsEditingProfile(false);
   };
 
   const handleSyncContacts = async (e?: React.FormEvent) => {
@@ -512,6 +630,7 @@ export default function App() {
           localStorage.setItem('telecall_rooms_cache', JSON.stringify(next));
           return next;
         });
+        recordRecentRoom(data.room.id);
         setShowCreateRoomModal(false);
         setNewRoomTitle('');
         setJoinedRoomId(data.room.id);
@@ -549,6 +668,7 @@ export default function App() {
         localStorage.setItem('telecall_rooms_cache', JSON.stringify(next));
         return next;
       });
+      recordRecentRoom(fallbackRoom.id);
       setShowCreateRoomModal(false);
       setNewRoomTitle('');
       setJoinedRoomId(fallbackRoom.id);
@@ -558,6 +678,8 @@ export default function App() {
 
   const handleJoinRoom = async (room: VoiceRoom) => {
     playTone(580, 0.12);
+    recordRecentRoom(room.id);
+
     try {
       const res = await fetch(`/api/rooms/${room.id}/join`, {
         method: 'POST',
@@ -609,28 +731,44 @@ export default function App() {
   const handleJoinByInviteLink = async (e: React.FormEvent) => {
     e.preventDefault();
     setInviteError('');
-    const res = await fetch('/api/rooms/join-by-code', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        code: inviteLinkInput,
-        userId: currentUser.userId,
-        name: currentUser.name,
-        phone: currentUser.phone
-      })
-    });
-    const data = await res.json();
-    if (data.ok && data.room) {
-      setRooms((prev) =>
-        prev.some((r) => r.id === data.room.id)
-          ? prev.map((r) => (r.id === data.room.id ? data.room : r))
-          : [data.room, ...prev]
+    try {
+      const res = await fetch('/api/rooms/join-by-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: inviteLinkInput,
+          userId: currentUser.userId,
+          name: currentUser.name,
+          phone: currentUser.phone
+        })
+      });
+      const data = await res.json();
+      if (data.ok && data.room) {
+        setRooms((prev) =>
+          prev.some((r) => r.id === data.room.id)
+            ? prev.map((r) => (r.id === data.room.id ? data.room : r))
+            : [data.room, ...prev]
+        );
+        recordRecentRoom(data.room.id);
+        setShowJoinByLinkModal(false);
+        setInviteLinkInput('');
+        setJoinedRoomId(data.room.id);
+      } else {
+        setInviteError(data.error || 'Group not found. Check the invite code or link.');
+      }
+    } catch {
+      const cleanCode = inviteLinkInput.trim().split('?room=').pop()?.trim().toLowerCase() || '';
+      const found = rooms.find(
+        (r) => r.inviteCode.toLowerCase() === cleanCode || r.id.toLowerCase() === cleanCode
       );
-      setShowJoinByLinkModal(false);
-      setInviteLinkInput('');
-      setJoinedRoomId(data.room.id);
-    } else {
-      setInviteError(data.error || 'Room not found. Check the invite link.');
+      if (found) {
+        recordRecentRoom(found.id);
+        setShowJoinByLinkModal(false);
+        setInviteLinkInput('');
+        setJoinedRoomId(found.id);
+      } else {
+        setInviteError('Group not found. Check the invite code or link.');
+      }
     }
   };
 
@@ -646,17 +784,25 @@ export default function App() {
         if (r.id !== roomId) return r;
         const updatedParticipants = r.participants.map((p) => {
           if (p.id !== targetId) return p;
-          if (action === 'toggle-mute') return { ...p, isMuted: !p.isMuted, isSpeaking: p.isMuted };
+          if (action === 'toggle-mute')
+            return { ...p, isMuted: !p.isMuted, isSpeaking: p.isMuted };
           if (action === 'toggle-hand') return { ...p, handRaised: !p.handRaised };
-          if (action === 'promote-speaker') return { ...p, role: 'speaker' as const, handRaised: false, isMuted: false };
-          if (action === 'move-to-listener') return { ...p, role: 'listener' as const, isMuted: true, isSpeaking: false };
+          if (action === 'promote-speaker')
+            return { ...p, role: 'speaker' as const, handRaised: false, isMuted: false };
+          if (action === 'move-to-listener')
+            return { ...p, role: 'listener' as const, isMuted: true, isSpeaking: false };
           return p;
         });
         return {
           ...r,
           topic: (extra?.newTopic as string) || r.topic,
-          rules: Array.isArray(extra?.newRules) ? (extra.newRules as string[]).filter(Boolean) : r.rules,
-          participants: action === 'leave' ? updatedParticipants.filter((p) => p.id !== currentUser.userId) : updatedParticipants
+          rules: Array.isArray(extra?.newRules)
+            ? (extra.newRules as string[]).filter(Boolean)
+            : r.rules,
+          participants:
+            action === 'leave'
+              ? updatedParticipants.filter((p) => p.id !== currentUser.userId)
+              : updatedParticipants
         };
       })
     );
@@ -672,7 +818,7 @@ export default function App() {
         })
       });
     } catch {
-      // Handled optimistically for static GitHub Pages WebView
+      // Handled optimistically
     }
     if (action === 'leave') {
       playTone(320, 0.14);
@@ -680,14 +826,20 @@ export default function App() {
     }
   };
 
+  // Recently Joined Rooms (in the exact order user joined them)
+  const recentlyJoinedRooms = recentRoomIds
+    .map((id) => rooms.find((r) => r.id === id))
+    .filter((r): r is VoiceRoom => Boolean(r));
+
   const visibleRooms = rooms.filter((r) => {
     const q = roomSearchQuery.trim().toLowerCase();
     const isCreator = r.hostId === currentUser.userId;
+    const isRecent = recentRoomIds.includes(r.id);
     const matchesExactInvite =
       q.length > 0 &&
       (r.inviteCode.toLowerCase() === q || q.endsWith(`room=${r.inviteCode.toLowerCase()}`));
 
-    if (r.visibility === 'private' && !isCreator && !matchesExactInvite) {
+    if (r.visibility === 'private' && !isCreator && !isRecent && !matchesExactInvite) {
       return false;
     }
 
@@ -712,51 +864,111 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0b141a] text-slate-100 flex flex-col max-w-2xl mx-auto border-x border-slate-800/60">
-      {/* Top App Header */}
-      {activeBottomTab === 'calls' ? (
+      {/* TOP HEADER BY ACTIVE TAB */}
+      {activeBottomTab === 'calls' && (
         <header className="sticky top-0 z-30 h-14 px-4 bg-[#111b21]/95 backdrop-blur-md border-b border-slate-800 flex items-center justify-between">
-          <span className="text-lg font-bold tracking-tight text-white">TeleCall</span>
-
-          <button
-            onClick={() => setShowAuthModal(true)}
-            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition-colors whitespace-nowrap"
-          >
-            {session ? `${session.name}` : 'Telegram Sign In'}
-          </button>
-        </header>
-      ) : (
-        /* Voice Rooms Header with Topic Search + Create Voice Room right next to it */
-        <header className="sticky top-0 z-30 px-4 py-2.5 bg-[#111b21]/95 backdrop-blur-md border-b border-slate-800 flex items-center gap-2">
-          <div className="relative flex-1">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={roomSearchQuery}
-              onChange={(e) => setRoomSearchQuery(e.target.value)}
-              placeholder="Search topics or voice rooms..."
-              className="w-full h-10 pl-9 pr-3 bg-[#0b141a] border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
-            />
+          <div className="flex items-center gap-2">
+            <span className="text-lg font-bold tracking-tight text-white">TeleCall</span>
           </div>
 
           <button
-            onClick={() => setShowJoinByLinkModal(true)}
-            className="min-h-[40px] px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 shrink-0 whitespace-nowrap"
+            onClick={() =>
+              session ? setActiveBottomTab('profile') : openAuthModal('existing_user')
+            }
+            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition-colors whitespace-nowrap flex items-center gap-1.5"
           >
-            <Link2 className="w-3.5 h-3.5" />
-            <span>Link</span>
-          </button>
-
-          <button
-            onClick={() => setShowCreateRoomModal(true)}
-            className="min-h-[40px] px-3.5 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs flex items-center gap-1.5 shrink-0 whitespace-nowrap"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Create</span>
+            <User className="w-3.5 h-3.5 text-sky-400" />
+            <span>{session ? session.name : 'Telegram Login'}</span>
           </button>
         </header>
       )}
 
-      {/* Main Scrollable Viewport */}
+      {activeBottomTab === 'rooms' && (
+        /* VOICE ROOMS HEADER: Search, Create or Join Group + Recently Joined Rooms Bar */
+        <header className="sticky top-0 z-30 bg-[#111b21]/95 backdrop-blur-md border-b border-slate-800 px-4 py-2.5 space-y-2.5">
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={roomSearchQuery}
+                onChange={(e) => setRoomSearchQuery(e.target.value)}
+                placeholder="Search voice rooms or topics..."
+                className="w-full h-10 pl-9 pr-3 bg-[#0b141a] border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
+              />
+            </div>
+
+            <button
+              onClick={() => setShowJoinByLinkModal(true)}
+              className="min-h-[40px] px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 shrink-0 whitespace-nowrap"
+            >
+              <Link2 className="w-3.5 h-3.5 text-sky-400" />
+              <span>Join Group</span>
+            </button>
+
+            <button
+              onClick={() => setShowCreateRoomModal(true)}
+              className="min-h-[40px] px-3.5 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs flex items-center gap-1.5 shrink-0 whitespace-nowrap"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Create</span>
+            </button>
+          </div>
+
+          {/* Header Recently Joined Rooms Strip */}
+          {recentlyJoinedRooms.length > 0 && !activeJoinedRoom && (
+            <div className="pt-1 border-t border-slate-800/80">
+              <div className="text-[11px] font-medium text-slate-400 mb-1.5">
+                Recently Joined Voice Rooms
+              </div>
+              <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
+                {recentlyJoinedRooms.map((recentRoom) => (
+                  <button
+                    key={recentRoom.id}
+                    onClick={() => handleJoinRoom(recentRoom)}
+                    className="min-h-[36px] px-3 py-1.5 rounded-xl bg-[#0b141a] hover:bg-slate-800/90 border border-slate-800 flex items-center gap-2 shrink-0 text-left transition-colors"
+                  >
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                    <span className="text-xs font-semibold text-white truncate max-w-[160px]">
+                      {recentRoom.title}
+                    </span>
+                    <span className="text-[11px] text-sky-400 tabular-nums shrink-0">
+                      {recentRoom.listenerCount}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </header>
+      )}
+
+      {activeBottomTab === 'profile' && (
+        <header className="sticky top-0 z-30 h-14 px-4 bg-[#111b21]/95 backdrop-blur-md border-b border-slate-800 flex items-center justify-between">
+          <span className="text-lg font-bold tracking-tight text-white">Telegram Profile</span>
+          {!session ? (
+            <button
+              onClick={() => openAuthModal('existing_user')}
+              className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-sky-500 text-slate-950 text-xs font-semibold"
+            >
+              Login with Telegram
+            </button>
+          ) : (
+            <button
+              onClick={() => {
+                mtprotoEngine.logout();
+                setSession(null);
+              }}
+              className="min-h-[38px] px-3 py-1.5 rounded-xl bg-rose-500/15 text-rose-300 border border-rose-500/30 text-xs font-medium flex items-center gap-1.5"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Log Out</span>
+            </button>
+          )}
+        </header>
+      )}
+
+      {/* MAIN SCROLLABLE VIEWPORT */}
       <main className="flex-1 px-4 py-4 pb-36">
         {/* ACTIVE VOICE ROOM FULL SCREEN STAGE */}
         {activeJoinedRoom ? (
@@ -777,7 +989,7 @@ export default function App() {
                   <span className="text-sky-400 font-medium">{activeJoinedRoom.topic}</span>
                   <span>·</span>
                   <span>
-                    {activeJoinedRoom.visibility === 'private' ? 'Private Room' : 'Public Room'}
+                    {activeJoinedRoom.visibility === 'private' ? 'Private Group' : 'Public Group'}
                   </span>
                   <span>·</span>
                   <span>{activeJoinedRoom.listenerCount.toLocaleString()} active</span>
@@ -883,7 +1095,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Listeners (1000+ Audience) */}
+            {/* Listeners */}
             <div>
               <h2 className="text-xs font-semibold text-slate-400 mb-2.5 tabular-nums">
                 Listeners ({activeJoinedRoom.listenerCount.toLocaleString()} active)
@@ -968,10 +1180,10 @@ export default function App() {
           </div>
         ) : (
           <>
-            {/* BOTTOM TAB 1: CALLS (Call Logs, Contacts, Dialer) */}
+            {/* FOOTER TAB 1: CALLS (Call Logs, Dialer, Contacts) */}
             {activeBottomTab === 'calls' && (
               <div className="space-y-4">
-                {/* Sub-Tab A: Call Logs */}
+                {/* Sub-Tab 1: Call Logs */}
                 {callsSubTab === 'logs' && (
                   <div className="bg-[#111b21] border border-slate-800 rounded-2xl divide-y divide-slate-800/80">
                     {callLogs.map((log) => (
@@ -1015,7 +1227,50 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Sub-Tab B: Contacts (with Sync & Add) */}
+                {/* Sub-Tab 2: Keypad Dialer */}
+                {callsSubTab === 'dialer' && (
+                  <div className="p-5 rounded-2xl bg-[#111b21] border border-slate-800 max-w-sm mx-auto space-y-4">
+                    <div className="flex items-center justify-between bg-[#0b141a] border border-slate-800 rounded-xl px-4 h-13">
+                      <input
+                        type="tel"
+                        value={dialedNumber}
+                        onChange={(e) => setDialedNumber(e.target.value)}
+                        className="w-full bg-transparent text-xl font-mono font-semibold text-white focus:outline-none tabular-nums"
+                      />
+                      <button
+                        onClick={() => setDialedNumber((prev) => prev.slice(0, -1))}
+                        className="min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-400 hover:text-white"
+                      >
+                        <Delete className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2.5">
+                      {DIAL_KEYS.map((digit) => (
+                        <button
+                          key={digit}
+                          onClick={() => {
+                            playTone(600, 0.05);
+                            setDialedNumber((prev) => prev + digit);
+                          }}
+                          className="h-13 rounded-2xl bg-[#0b141a] hover:bg-slate-800 border border-slate-800/80 text-lg font-semibold text-white active:scale-95 transition-transform tabular-nums"
+                        >
+                          {digit}
+                        </button>
+                      ))}
+                    </div>
+
+                    <button
+                      onClick={() => startCall(dialedNumber, dialedNumber, dialedNumber)}
+                      className="w-full h-13 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm flex items-center justify-center gap-2"
+                    >
+                      <Phone className="w-5 h-5" />
+                      <span>Call</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* Sub-Tab 3: Contacts */}
                 {callsSubTab === 'contacts' && (
                   <div className="space-y-3">
                     <div className="flex items-center justify-between gap-2">
@@ -1028,7 +1283,7 @@ export default function App() {
                             syncingContacts ? 'animate-spin text-sky-400' : ''
                           }`}
                         />
-                        <span>{syncingContacts ? 'Syncing...' : 'Sync Contacts'}</span>
+                        <span>{syncingContacts ? 'Syncing...' : 'Sync Telegram Contacts'}</span>
                       </button>
 
                       <button
@@ -1109,53 +1364,10 @@ export default function App() {
                     </div>
                   </div>
                 )}
-
-                {/* Sub-Tab C: Keypad Dialer */}
-                {callsSubTab === 'dialer' && (
-                  <div className="p-5 rounded-2xl bg-[#111b21] border border-slate-800 max-w-sm mx-auto space-y-4">
-                    <div className="flex items-center justify-between bg-[#0b141a] border border-slate-800 rounded-xl px-4 h-13">
-                      <input
-                        type="tel"
-                        value={dialedNumber}
-                        onChange={(e) => setDialedNumber(e.target.value)}
-                        className="w-full bg-transparent text-xl font-mono font-semibold text-white focus:outline-none tabular-nums"
-                      />
-                      <button
-                        onClick={() => setDialedNumber((prev) => prev.slice(0, -1))}
-                        className="min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-400 hover:text-white"
-                      >
-                        <Delete className="w-5 h-5" />
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-3 gap-2.5">
-                      {DIAL_KEYS.map((digit) => (
-                        <button
-                          key={digit}
-                          onClick={() => {
-                            playTone(600, 0.05);
-                            setDialedNumber((prev) => prev + digit);
-                          }}
-                          className="h-13 rounded-2xl bg-[#0b141a] hover:bg-slate-800 border border-slate-800/80 text-lg font-semibold text-white active:scale-95 transition-transform tabular-nums"
-                        >
-                          {digit}
-                        </button>
-                      ))}
-                    </div>
-
-                    <button
-                      onClick={() => startCall(dialedNumber, dialedNumber, dialedNumber)}
-                      className="w-full h-13 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm flex items-center justify-center gap-2"
-                    >
-                      <Phone className="w-5 h-5" />
-                      <span>Call</span>
-                    </button>
-                  </div>
-                )}
               </div>
             )}
 
-            {/* BOTTOM TAB 2: VOICE ROOMS (Clean list showing Room Name, Topic & Active Users without inline rules bar) */}
+            {/* FOOTER TAB 2: VOICE ROOMS */}
             {activeBottomTab === 'rooms' && (
               <div className="space-y-4">
                 {/* Horizontal Topic Filter Bar */}
@@ -1175,7 +1387,7 @@ export default function App() {
                   ))}
                 </div>
 
-                {/* Voice Rooms List: Only Room Name, Topic, Active Users, and Join Action */}
+                {/* Voice Rooms List */}
                 <div className="space-y-3">
                   {visibleRooms.map((room) => (
                     <div
@@ -1189,6 +1401,12 @@ export default function App() {
                           <span className="shrink-0">
                             {room.listenerCount.toLocaleString()} active
                           </span>
+                          {recentRoomIds.includes(room.id) && (
+                            <>
+                              <span>·</span>
+                              <span className="text-emerald-400 shrink-0">Joined Recently</span>
+                            </>
+                          )}
                           {room.visibility === 'private' && (
                             <>
                               <span>·</span>
@@ -1236,11 +1454,187 @@ export default function App() {
                 </div>
               </div>
             )}
+
+            {/* FOOTER TAB 3: TELEGRAM PROFILE */}
+            {activeBottomTab === 'profile' && (
+              <div className="space-y-4">
+                {/* User Telegram Profile Card */}
+                <div className="p-5 rounded-2xl bg-[#111b21] border border-slate-800 space-y-5">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-4 min-w-0">
+                      <div className="w-16 h-16 rounded-full bg-sky-500/20 border border-sky-400/40 text-sky-300 flex items-center justify-center font-bold text-xl shrink-0">
+                        {currentUser.name.slice(0, 2).toUpperCase()}
+                      </div>
+                      <div className="min-w-0">
+                        <h2 className="text-lg font-bold text-white truncate">
+                          {currentUser.name}
+                        </h2>
+                        <p className="text-xs text-sky-400 font-medium truncate">
+                          {currentUser.username}
+                        </p>
+                        <p className="text-xs text-slate-400 font-mono mt-0.5">
+                          {currentUser.phone}
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        setEditName(currentUser.name);
+                        setEditUsername(currentUser.username);
+                        setEditBio(currentUser.bio || '');
+                        setIsEditingProfile((v) => !v);
+                      }}
+                      className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 shrink-0"
+                    >
+                      <Edit3 className="w-3.5 h-3.5 text-sky-400" />
+                      <span>Edit</span>
+                    </button>
+                  </div>
+
+                  {isEditingProfile && (
+                    <form
+                      onSubmit={handleSaveProfileEdits}
+                      className="p-4 rounded-xl bg-[#0b141a] border border-slate-800 space-y-3"
+                    >
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">
+                          Telegram Display Name
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                          className="w-full h-10 px-3 rounded-xl bg-[#111b21] border border-slate-800 text-xs text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">
+                          Telegram Username
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={editUsername}
+                          onChange={(e) => setEditUsername(e.target.value)}
+                          className="w-full h-10 px-3 rounded-xl bg-[#111b21] border border-slate-800 text-xs text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">Bio</label>
+                        <input
+                          type="text"
+                          value={editBio}
+                          onChange={(e) => setEditBio(e.target.value)}
+                          className="w-full h-10 px-3 rounded-xl bg-[#111b21] border border-slate-800 text-xs text-white"
+                        />
+                      </div>
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setIsEditingProfile(false)}
+                          className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-slate-800 text-xs text-slate-300"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          className="min-h-[38px] px-4 py-1.5 rounded-xl bg-sky-500 text-slate-950 font-semibold text-xs"
+                        >
+                          Save Telegram Profile
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  {/* Telegram Account Details */}
+                  <div className="divide-y divide-slate-800/80 border-t border-slate-800 pt-2">
+                    <div className="py-3 flex items-center justify-between gap-2">
+                      <span className="text-xs text-slate-400">Bio</span>
+                      <span className="text-xs text-slate-200 text-right">
+                        {currentUser.bio || 'Available on TeleCall'}
+                      </span>
+                    </div>
+                    <div className="py-3 flex items-center justify-between gap-2">
+                      <span className="text-xs text-slate-400">Telegram Phone</span>
+                      <span className="text-xs text-slate-200 font-mono">
+                        {currentUser.phone}
+                      </span>
+                    </div>
+                    <div className="py-3 flex items-center justify-between gap-2">
+                      <span className="text-xs text-slate-400">Two-Step Verification (2FA)</span>
+                      <span className="text-xs text-emerald-400 font-medium flex items-center gap-1">
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                        <span>{currentUser.twoFactorEnabled ? 'Enabled' : 'Standard OTP'}</span>
+                      </span>
+                    </div>
+                    {currentUser.email && (
+                      <div className="py-3 flex items-center justify-between gap-2">
+                        <span className="text-xs text-slate-400">Recovery / Login Email</span>
+                        <span className="text-xs text-slate-200">{currentUser.email}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Switch or Login with Telegram Account Buttons */}
+                  <div className="pt-2 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <button
+                      onClick={() => openAuthModal('existing_user')}
+                      className="min-h-[42px] px-4 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs flex items-center justify-center gap-2"
+                    >
+                      <User className="w-4 h-4" />
+                      <span>Login Existing Telegram User</span>
+                    </button>
+                    <button
+                      onClick={() => openAuthModal('new_user')}
+                      className="min-h-[42px] px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs flex items-center justify-center gap-2"
+                    >
+                      <UserPlus className="w-4 h-4 text-sky-400" />
+                      <span>New User Sign Up (Call/SMS/Email)</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* User's Recently Joined Voice Rooms on Profile */}
+                {recentlyJoinedRooms.length > 0 && (
+                  <div className="p-4 rounded-2xl bg-[#111b21] border border-slate-800 space-y-3">
+                    <h3 className="text-xs font-semibold text-slate-400">
+                      Recently Joined Voice Rooms
+                    </h3>
+                    <div className="space-y-2">
+                      {recentlyJoinedRooms.map((rm) => (
+                        <div
+                          key={rm.id}
+                          className="p-3 rounded-xl bg-[#0b141a] border border-slate-800 flex items-center justify-between gap-3"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-xs font-semibold text-white truncate">
+                              {rm.title}
+                            </div>
+                            <div className="text-[11px] text-sky-400">{rm.topic}</div>
+                          </div>
+                          <button
+                            onClick={() => {
+                              setActiveBottomTab('rooms');
+                              handleJoinRoom(rm);
+                            }}
+                            className="min-h-[36px] px-3 py-1.5 rounded-xl bg-sky-500 text-slate-950 font-semibold text-xs shrink-0"
+                          >
+                            Rejoin
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </>
         )}
       </main>
 
-      {/* FLOATING CALLS SUB-NAVIGATION BAR ABOVE FOOTER (Call Logs | Contacts | Dialer) */}
+      {/* FLOATING BUTTONS ON CALLS PAGE (Call Logs | Dialer | Contacts) */}
       {activeBottomTab === 'calls' && !activeJoinedRoom && (
         <div className="fixed bottom-19 left-0 right-0 z-30 flex justify-center px-4 pointer-events-none">
           <div className="pointer-events-auto bg-[#111b21]/95 backdrop-blur-md border border-slate-700/80 shadow-xl rounded-2xl p-1 flex items-center gap-1">
@@ -1255,16 +1649,6 @@ export default function App() {
               Call Logs
             </button>
             <button
-              onClick={() => setCallsSubTab('contacts')}
-              className={`min-h-[38px] px-4 py-1.5 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
-                callsSubTab === 'contacts'
-                  ? 'bg-sky-500 text-slate-950'
-                  : 'text-slate-300 hover:text-white'
-              }`}
-            >
-              Contacts
-            </button>
-            <button
               onClick={() => setCallsSubTab('dialer')}
               className={`min-h-[38px] px-4 py-1.5 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
                 callsSubTab === 'dialer'
@@ -1273,6 +1657,16 @@ export default function App() {
               }`}
             >
               Dialer
+            </button>
+            <button
+              onClick={() => setCallsSubTab('contacts')}
+              className={`min-h-[38px] px-4 py-1.5 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
+                callsSubTab === 'contacts'
+                  ? 'bg-sky-500 text-slate-950'
+                  : 'text-slate-300 hover:text-white'
+              }`}
+            >
+              Contacts
             </button>
           </div>
         </div>
@@ -1381,21 +1775,21 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL: Join Private Room via Invite Link / Code */}
+      {/* MODAL: Join Group via Invite Link / Code */}
       {showJoinByLinkModal && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <form
             onSubmit={handleJoinByInviteLink}
             className="bg-[#111b21] border border-slate-800 rounded-2xl max-w-sm w-full p-5 space-y-4"
           >
-            <h3 className="text-base font-bold text-white">Join Private Voice Room</h3>
+            <h3 className="text-base font-bold text-white">Join Voice Group</h3>
             <p className="text-xs text-slate-400">
-              Paste the invite link or room code shared by the room creator:
+              Paste the invite link or group code shared by the room host:
             </p>
             <input
               type="text"
               required
-              placeholder="Paste invite link or code..."
+              placeholder="Paste invite link or code (e.g. upsc101)..."
               value={inviteLinkInput}
               onChange={(e) => setInviteLinkInput(e.target.value)}
               className="w-full h-11 px-3.5 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white"
@@ -1416,14 +1810,14 @@ export default function App() {
                 type="submit"
                 className="min-h-[40px] px-4 py-2 rounded-xl bg-sky-500 text-slate-950 text-xs font-semibold"
               >
-                Join Room
+                Join Group
               </button>
             </div>
           </form>
         </div>
       )}
 
-      {/* MODAL: Room Rules Popup (Only when user clicks Rules inside room) */}
+      {/* MODAL: Room Rules Popup */}
       {roomPreviewRules && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-[#111b21] border border-slate-800 rounded-2xl max-w-sm w-full p-5 space-y-4">
@@ -1491,70 +1885,323 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL: Telegram Login / Registration (MTProto StringSession) */}
+      {/* MODAL: Telegram Login (OTP + 2FA) & New User Registration (SMS / Phone Call / Email OTP) */}
       {showAuthModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <form
-            onSubmit={authStep === 'otp' ? handleVerifyOtp : handleSendOtp}
-            className="bg-[#111b21] border border-slate-800 rounded-2xl max-w-sm w-full p-5 space-y-4"
+            onSubmit={authStep === 'phone' ? handleSendOtp : handleVerifyOtpOr2FA}
+            className="bg-[#111b21] border border-slate-800 rounded-2xl max-w-md w-full p-5 space-y-4"
           >
-            <h3 className="text-base font-bold text-white">Telegram Login</h3>
-            <div>
-              <label className="block text-xs text-slate-400 mb-1">Your Name</label>
-              <input
-                type="text"
-                required
-                placeholder="Enter your name"
-                value={nameInput}
-                onChange={(e) => setNameInput(e.target.value)}
-                className="w-full h-10 px-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-slate-400 mb-1">Phone Number</label>
-              <input
-                type="tel"
-                required
-                value={phoneInput}
-                onChange={(e) => setPhoneInput(e.target.value)}
-                className="w-full h-10 px-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white font-mono"
-              />
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-white">
+                {authMode === 'existing_user'
+                  ? 'Telegram Account Login'
+                  : 'New Telegram User Sign Up'}
+              </h3>
+              <span className="text-[11px] text-sky-400 font-medium">TeleCall MTProto</span>
             </div>
 
+            {/* Switch between Existing Telegram User vs New User */}
+            <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-[#0b141a] border border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('existing_user');
+                  setAuthStep('phone');
+                  setDeliveryMethod('telegram_app');
+                  setAuthError('');
+                }}
+                className={`min-h-[36px] rounded-lg text-xs font-semibold transition-colors ${
+                  authMode === 'existing_user'
+                    ? 'bg-sky-500 text-slate-950'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Existing Telegram User
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('new_user');
+                  setAuthStep('phone');
+                  setDeliveryMethod('sms');
+                  setAuthError('');
+                }}
+                className={`min-h-[36px] rounded-lg text-xs font-semibold transition-colors ${
+                  authMode === 'new_user'
+                    ? 'bg-sky-500 text-slate-950'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                New User Sign Up
+              </button>
+            </div>
+
+            {/* STEP 1: Phone Number + Verification Delivery Method */}
+            {authStep === 'phone' && (
+              <div className="space-y-3">
+                {authMode === 'new_user' && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">First Name</label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="First name"
+                        value={firstNameInput}
+                        onChange={(e) => setFirstNameInput(e.target.value)}
+                        className="w-full h-10 px-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">
+                        Last Name (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="Last name"
+                        value={lastNameInput}
+                        onChange={(e) => setLastNameInput(e.target.value)}
+                        className="w-full h-10 px-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">
+                    Telegram Phone Number
+                  </label>
+                  <input
+                    type="tel"
+                    required
+                    value={phoneInput}
+                    onChange={(e) => setPhoneInput(e.target.value)}
+                    className="w-full h-10 px-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white font-mono"
+                  />
+                </div>
+
+                {/* Verification Method Selector (Telegram App, SMS, Phone Call, Email OTP) */}
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1.5">
+                    Receive Verification Code Via
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {authMode === 'existing_user' && (
+                      <button
+                        type="button"
+                        onClick={() => setDeliveryMethod('telegram_app')}
+                        className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 ${
+                          deliveryMethod === 'telegram_app'
+                            ? 'bg-sky-500/20 border-sky-500 text-sky-300'
+                            : 'bg-[#0b141a] border-slate-800 text-slate-400'
+                        }`}
+                      >
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        <span>Telegram App OTP</span>
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => setDeliveryMethod('sms')}
+                      className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 ${
+                        deliveryMethod === 'sms'
+                          ? 'bg-sky-500/20 border-sky-500 text-sky-300'
+                          : 'bg-[#0b141a] border-slate-800 text-slate-400'
+                      }`}
+                    >
+                      <MessageSquare className="w-3.5 h-3.5" />
+                      <span>SMS OTP</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setDeliveryMethod('phone_call')}
+                      className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 ${
+                        deliveryMethod === 'phone_call'
+                          ? 'bg-sky-500/20 border-sky-500 text-sky-300'
+                          : 'bg-[#0b141a] border-slate-800 text-slate-400'
+                      }`}
+                    >
+                      <PhoneCall className="w-3.5 h-3.5" />
+                      <span>Phone Call OTP</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setDeliveryMethod('email')}
+                      className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 ${
+                        deliveryMethod === 'email'
+                          ? 'bg-sky-500/20 border-sky-500 text-sky-300'
+                          : 'bg-[#0b141a] border-slate-800 text-slate-400'
+                      }`}
+                    >
+                      <Mail className="w-3.5 h-3.5" />
+                      <span>Email OTP</span>
+                    </button>
+                  </div>
+                </div>
+
+                {deliveryMethod === 'email' && (
+                  <div>
+                    <label className="block text-xs text-sky-400 mb-1">
+                      Email Address for Telegram OTP
+                    </label>
+                    <input
+                      type="email"
+                      required
+                      placeholder="you@example.com"
+                      value={emailInput}
+                      onChange={(e) => setEmailInput(e.target.value)}
+                      className="w-full h-10 px-3 rounded-xl bg-[#0b141a] border border-sky-500/60 text-xs text-white"
+                    />
+                  </div>
+                )}
+
+                {authMode === 'existing_user' && (
+                  <label className="flex items-center justify-between p-2.5 rounded-xl bg-[#0b141a] border border-slate-800 cursor-pointer">
+                    <div className="flex items-center gap-2">
+                      <ShieldCheck className="w-4 h-4 text-sky-400" />
+                      <span className="text-xs text-slate-300">
+                        My account has 2-Step Verification (2FA Password)
+                      </span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={twoFactorEnabledToggle}
+                      onChange={(e) => setTwoFactorEnabledToggle(e.target.checked)}
+                      className="accent-sky-500 w-4 h-4"
+                    />
+                  </label>
+                )}
+              </div>
+            )}
+
+            {/* STEP 2: OTP Verification (with instant switching between SMS, Call, or Email OTP) */}
             {authStep === 'otp' && (
-              <div>
-                <label className="block text-xs text-sky-400 mb-1">Telegram Verification Code</label>
-                <input
-                  type="text"
-                  required
-                  value={otpInput}
-                  onChange={(e) => setOtpInput(e.target.value)}
-                  className="w-full h-10 px-3 rounded-xl bg-[#0b141a] border border-sky-500 text-xs text-white font-mono tracking-widest"
-                />
+              <div className="space-y-3">
+                <div className="p-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-slate-300">
+                  {deliveryMethod === 'telegram_app' &&
+                    `Code sent to your Telegram app on ${phoneInput}.`}
+                  {deliveryMethod === 'sms' && `SMS OTP sent to ${phoneInput}.`}
+                  {deliveryMethod === 'phone_call' &&
+                    `Calling ${phoneInput} with your 5-digit Telegram voice code...`}
+                  {deliveryMethod === 'email' &&
+                    `Email OTP sent to ${emailInput || 'your email'}.`}
+                </div>
+
+                <div>
+                  <label className="block text-xs text-sky-400 mb-1">
+                    Enter 5-Digit Verification Code
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={otpInput}
+                    onChange={(e) => setOtpInput(e.target.value)}
+                    className="w-full h-11 px-3 rounded-xl bg-[#0b141a] border border-sky-500 text-sm text-white font-mono tracking-widest"
+                  />
+                </div>
+
+                {/* Resend / Switch Delivery Method like Telegram */}
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={(e) => handleSendOtp(e, 'sms')}
+                    className="text-[11px] text-sky-400 hover:underline"
+                  >
+                    Get Code via SMS
+                  </button>
+                  <span className="text-slate-600">·</span>
+                  <button
+                    type="button"
+                    onClick={(e) => handleSendOtp(e, 'phone_call')}
+                    className="text-[11px] text-sky-400 hover:underline"
+                  >
+                    Request Phone Call
+                  </button>
+                  <span className="text-slate-600">·</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDeliveryMethod('email');
+                      setAuthStep('phone');
+                    }}
+                    className="text-[11px] text-sky-400 hover:underline"
+                  >
+                    Get Code via Email
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* STEP 3: Telegram 2-Factor Authentication (Cloud Password) */}
+            {authStep === '2fa' && (
+              <div className="space-y-3">
+                <div className="p-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-slate-300 flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-sky-400 shrink-0" />
+                  <span>
+                    Two-Step Verification is enabled on this Telegram account. Enter your Cloud
+                    Password to finish signing in.
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-xs text-sky-400 mb-1">
+                    Telegram 2FA Cloud Password
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    placeholder="Enter your 2FA password..."
+                    value={twoFactorPassword}
+                    onChange={(e) => setTwoFactorPassword(e.target.value)}
+                    className="w-full h-11 px-3 rounded-xl bg-[#0b141a] border border-sky-500 text-xs text-white"
+                  />
+                </div>
               </div>
             )}
 
             {authError && <p className="text-xs text-rose-400">{authError}</p>}
 
-            <div className="flex justify-end gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => setShowAuthModal(false)}
-                className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-800 text-xs text-slate-300"
-              >
-                Close
-              </button>
-              <button
-                type="submit"
-                disabled={authLoading}
-                className="min-h-[40px] px-4 py-2 rounded-xl bg-sky-500 text-slate-950 text-xs font-semibold"
-              >
-                {authLoading
-                  ? 'Please wait...'
-                  : authStep === 'otp'
-                  ? 'Verify & Login'
-                  : 'Send Code'}
-              </button>
+            <div className="flex justify-between items-center gap-2 pt-1">
+              {authStep !== 'phone' ? (
+                <button
+                  type="button"
+                  onClick={() => setAuthStep('phone')}
+                  className="min-h-[40px] px-3 py-2 rounded-xl bg-slate-800 text-xs text-slate-300"
+                >
+                  Back
+                </button>
+              ) : (
+                <div />
+              )}
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAuthModal(false)}
+                  className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-800 text-xs text-slate-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={authLoading}
+                  className="min-h-[40px] px-4 py-2 rounded-xl bg-sky-500 text-slate-950 text-xs font-semibold"
+                >
+                  {authLoading
+                    ? 'Please wait...'
+                    : authStep === 'phone'
+                    ? 'Send Code'
+                    : authStep === '2fa'
+                    ? 'Verify 2FA & Login'
+                    : twoFactorEnabledToggle && authMode === 'existing_user'
+                    ? 'Next (2FA)'
+                    : 'Verify & Login'}
+                </button>
+              </div>
             </div>
           </form>
         </div>
@@ -1642,8 +2289,8 @@ export default function App() {
         </div>
       )}
 
-      {/* STRICTLY 2 BOTTOM NAVIGATION BARS: Calls & Voice Rooms */}
-      <nav className="fixed bottom-0 left-0 right-0 z-40 h-16 max-w-2xl mx-auto bg-[#111b21]/95 backdrop-blur-md border-t border-slate-800 grid grid-cols-2 items-center">
+      {/* HOMEPAGE FOOTER: STRICTLY 3 OPTIONS (Calls | Voice Rooms | Profile) */}
+      <nav className="fixed bottom-0 left-0 right-0 z-40 h-16 max-w-2xl mx-auto bg-[#111b21]/95 backdrop-blur-md border-t border-slate-800 grid grid-cols-3 items-center">
         <button
           onClick={() => setActiveBottomTab('calls')}
           className={`h-full flex flex-col items-center justify-center transition-colors ${
@@ -1662,6 +2309,16 @@ export default function App() {
         >
           <Users className="w-5 h-5" />
           <span className="text-xs font-semibold mt-1">Voice Rooms</span>
+        </button>
+
+        <button
+          onClick={() => setActiveBottomTab('profile')}
+          className={`h-full flex flex-col items-center justify-center transition-colors ${
+            activeBottomTab === 'profile' ? 'text-sky-400' : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <User className="w-5 h-5" />
+          <span className="text-xs font-semibold mt-1">Profile</span>
         </button>
       </nav>
     </div>

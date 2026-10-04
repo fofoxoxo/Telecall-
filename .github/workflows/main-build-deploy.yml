@@ -1,0 +1,199 @@
+name: TeleChats Single-Branch (main) CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      webview_url:
+        description: 'Optional Custom WebView URL (Defaults to GitHub Pages URL)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: 'telechats-main-cicd'
+  cancel-in-progress: false
+
+jobs:
+  build-and-package:
+    name: Build Backend, Webview Bundle & Android Dev APK
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout Repository
+      - name: 1. Checkout Source Code (main branch)
+        uses: actions/checkout@v4
+
+      # 2. Setup Node.js 22 & Java 21 (Required for Capacitor 8 / Android Gradle Plugin 8)
+      - name: 2. Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+
+      - name: 3. Setup Java JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      # 3. Install Dependencies
+      - name: 4. Install NPM & Capacitor Dependencies
+        run: |
+          npm install --legacy-peer-deps --no-audit --no-fund
+          npm install @capacitor/core@latest @capacitor/cli@latest @capacitor/android@latest @capacitor/status-bar@latest @capacitor/keyboard@latest --legacy-peer-deps --no-audit --no-fund
+
+      # 4. Requirement 2: Secret Injection into Runtime Environment & .env File
+      - name: 5. Inject GitHub Secrets into Runtime Environment & .env
+        env:
+          SECRET_TG_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          SECRET_TG_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          SECRET_FIREBASE_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          REPO_OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          DEFAULT_WEBVIEW_URL="https://${REPO_OWNER}.github.io/${REPO_NAME}/"
+          FINAL_WEBVIEW_URL="${{ github.event.inputs.webview_url || '' }}"
+          if [ -z "$FINAL_WEBVIEW_URL" ]; then
+            FINAL_WEBVIEW_URL="$DEFAULT_WEBVIEW_URL"
+          fi
+
+          echo "FINAL_WEBVIEW_URL=$FINAL_WEBVIEW_URL" >> $GITHUB_ENV
+
+          cat << EOF > .env
+          NODE_ENV=production
+          PORT=3000
+          APP_URL=${FINAL_WEBVIEW_URL}
+          TELEGRAM_API_ID=${SECRET_TG_API_ID}
+          TELEGRAM_API_HASH=${SECRET_TG_API_HASH}
+          VITE_TELEGRAM_API_ID=${SECRET_TG_API_ID}
+          VITE_TELEGRAM_API_HASH=${SECRET_TG_API_HASH}
+          FIREBASE_SERVICE_ACCOUNT_PATH=./firebase-service-account.json
+          EOF
+
+          if [ -n "$SECRET_FIREBASE_JSON" ]; then
+            echo "$SECRET_FIREBASE_JSON" > firebase-service-account.json
+          fi
+
+      # 5. Requirement 3: Express Backend Lint, Smoke Test & Standalone Compilation
+      - name: 6. Lint, Smoke-Test & Compile Express Backend Package
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          npm run lint
+          npx tsx -e "import './src/backend/index.ts'; console.log('✅ Backend modules verified');"
+          npm run build:backend
+          cp package.json dist-backend/package.json
+          cp .env.example dist-backend/.env.example
+          if [ -f "firebase-service-account.json" ]; then
+            cp firebase-service-account.json dist-backend/firebase-service-account.json
+          fi
+
+      # 6. Requirement 5: Compile & Build Webview Client Assets Bundle + Deploy to gh-pages
+      - name: 7. Build Webview Client Bundle & Publish to GitHub Pages
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          VITE_TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          VITE_TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          npm run build
+          cp dist/index.html dist/404.html
+          touch dist/.nojekyll
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            cd dist
+            git init
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git checkout -b gh-pages
+            git add -A
+            git commit -m "Deploy TeleChats Webview Bundle from main"
+            git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages || true
+            cd ..
+          fi
+
+      # 7. Requirement 4: Android Dev/Debug APK Gradle Build & Signing
+      - name: 8. Configure Capacitor & Assemble Android Dev/Debug APK
+        run: |
+          cat << EOF > capacitor.config.json
+          {
+            "appId": "com.telecall.dev",
+            "appName": "TeleCall Dev",
+            "webDir": "dist",
+            "server": {
+              "url": "${{ env.FINAL_WEBVIEW_URL }}",
+              "cleartext": true,
+              "errorPath": "index.html",
+              "androidScheme": "https",
+              "allowNavigation": ["*"]
+            },
+            "android": {
+              "allowMixedContent": true,
+              "captureInput": true,
+              "webContentsDebuggingEnabled": true,
+              "backgroundColor": "#0b141a"
+            },
+            "plugins": {
+              "StatusBar": {
+                "overlaysWebView": true,
+                "style": "DARK",
+                "backgroundColor": "#00000000"
+              }
+            }
+          }
+          EOF
+
+          if [ ! -d "android/app" ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+          chmod +x android/gradlew || true
+
+          # Inject Android Audio, Microphone & Contact Permissions
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ] && ! grep -q "android.permission.RECORD_AUDIO" "$MANIFEST"; then
+            sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <uses-permission android:name="android.permission.BLUETOOTH" />\n    <uses-permission android:name="android.permission.READ_CONTACTS" />' "$MANIFEST"
+          fi
+
+          cd android
+          ./gradlew assembleDebug --no-daemon --stacktrace
+          cd ..
+
+          mkdir -p artifacts/apk
+          find android/app/build/outputs/apk/debug -name "*.apk" -exec cp {} artifacts/apk/telecall-dev-debug.apk \;
+
+      # 8. Requirement 6: Unified Artifact Uploads (Backend Package + Android Dev APK + Webview Bundle)
+      - name: 9. Upload Artifact 1 — Express Backend Distribution Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: 1-telechats-backend-server-package
+          path: |
+            dist-backend/server.mjs
+            dist-backend/package.json
+            dist-backend/.env.example
+          retention-days: 30
+
+      - name: 10. Upload Artifact 2 — Android Dev/Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: 2-telechats-android-dev-apk
+          path: artifacts/apk/telecall-dev-debug.apk
+          retention-days: 30
+
+      - name: 11. Upload Artifact 3 — Webview Deployment Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3-telechats-webview-bundle
+          path: dist/
+          retention-days: 30

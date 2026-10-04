@@ -9,6 +9,9 @@ import {
   createLocalSyncRouter,
   createCommunityTopicRouter,
   createSfuRouter,
+  createFcmNotificationsRouter,
+  realtimeSocketGateway,
+  fcmPushService,
   handleSfuSignalingMessage,
   communityTopicEngine,
   offlineQueueManager,
@@ -285,9 +288,20 @@ async function startServer() {
   app.use('/api/local-sync', createLocalSyncRouter());
   app.use('/api/community-topics', createCommunityTopicRouter());
   app.use('/api/sfu', createSfuRouter());
+  app.use('/api/notifications', createFcmNotificationsRouter());
 
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  realtimeSocketGateway.attachToServer(server);
+  const wss = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    const pathname = request.url ? request.url.split('?')[0] : '';
+    if (pathname === '/ws') {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+      });
+    }
+  });
 
   const clients = new Set<WebSocket>();
 
@@ -342,37 +356,64 @@ async function startServer() {
     });
   });
 
-  // 1. Telegram Auth Step 1: Send OTP Code (`auth.sendCode`)
+  // 1. Telegram Auth Step 1: Send OTP Code (`auth.sendCode` / `auth.resendCode` via Telegram App, SMS, Flash Call, or Email)
   app.post('/api/auth/send-code', (req, res) => {
-    const { phone, apiId, apiHash } = req.body;
-    const effectiveApiId = apiId || process.env.TELEGRAM_API_ID || '28419022';
-    const effectiveApiHash = apiHash || process.env.TELEGRAM_API_HASH || '9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c';
+    const { phone, email, deliveryMethod, isNewUser, apiId, apiHash } = req.body;
+    const effectiveApiId = apiId || process.env.TELEGRAM_API_ID || process.env.VITE_TELEGRAM_API_ID || '0';
+    const effectiveApiHash = apiHash || process.env.TELEGRAM_API_HASH || process.env.VITE_TELEGRAM_API_HASH || 'telecall-secret-hash';
 
     if (!phone || String(phone).trim().length < 7) {
       res.status(400).json({ error: 'Valid phone number is required.' });
       return;
     }
 
+    const method = deliveryMethod || (isNewUser ? 'sms' : 'telegram_app');
     const phoneCodeHash = crypto
       .createHmac('sha256', String(effectiveApiHash))
-      .update(String(phone) + ':' + String(effectiveApiId))
+      .update(String(phone) + ':' + String(effectiveApiId) + ':' + String(method))
       .digest('hex')
       .slice(0, 18);
 
     res.json({
       ok: true,
       phoneCodeHash,
+      deliveryMethod: method,
+      emailSentTo: method === 'email' ? String(email || '') : undefined,
+      nextType: method === 'sms' ? 'phone_call' : 'sms',
     });
   });
 
-  // 2. Telegram Auth Step 2: Verify Code & Sign In (`auth.signIn`)
+  // 2. Telegram Auth Step 2: Verify Code, Optional 2FA Cloud Password (`auth.checkPassword`), or New User Sign Up (`auth.signUp`)
   app.post('/api/auth/verify-code', (req, res) => {
-    const { phone, code, phoneCodeHash, name } = req.body;
+    const {
+      phone,
+      code,
+      phoneCodeHash,
+      name,
+      lastName,
+      bio,
+      email,
+      twoFactorPassword,
+      require2FA,
+    } = req.body;
+
     if (!phone || !code || !phoneCodeHash) {
       res.status(400).json({ error: 'Phone number and verification code are required.' });
       return;
     }
 
+    // If user enabled 2FA check and has not yet supplied their Telegram 2FA Cloud Password
+    if (require2FA && !twoFactorPassword) {
+      res.json({
+        ok: false,
+        requires2FA: true,
+        passwordHint: 'Your Telegram Cloud Password',
+        error: 'SESSION_PASSWORD_NEEDED',
+      });
+      return;
+    }
+
+    const fullName = [name?.trim(), lastName?.trim()].filter(Boolean).join(' ') || 'TeleCall User';
     const userId = 'tg-user-' + crypto.createHash('md5').update(String(phone)).digest('hex').slice(0, 8);
     const authKeyHex = crypto.createHash('sha256').update(userId + ':' + phoneCodeHash).digest('hex');
 
@@ -382,9 +423,12 @@ async function startServer() {
       serverSalt: crypto.randomBytes(8).toString('hex'),
       user: {
         id: userId,
-        name: name?.trim() || 'TeleCall User',
+        name: fullName,
         phone: String(phone),
-        username: '@' + (name?.trim()?.toLowerCase().replace(/[^a-z0-9]/g, '_') || 'telecall_user'),
+        username: '@' + (fullName.toLowerCase().replace(/[^a-z0-9]/g, '_') || 'telecall_user'),
+        bio: String(bio || 'Available on TeleCall (MTProto Low-Latency Voice)'),
+        email: email ? String(email) : undefined,
+        twoFactorEnabled: Boolean(twoFactorPassword || require2FA),
       },
     });
   });
@@ -410,15 +454,27 @@ async function startServer() {
     res.json({ ok: true, contacts: defaultContacts });
   });
 
-  // 4. E2EE 1-on-1 Call Handshake & Call Log recording
+  // 4. E2EE 1-on-1 Call Handshake & Call Log recording + High-Priority FCM Wakeup Push
   app.post('/api/call/handshake', (req, res) => {
-    const { callerId, calleeId, contactName, phone } = req.body;
+    const { callerId, callerName, calleeId, contactName, phone } = req.body;
     const sessionId = 'call-' + Date.now().toString(36);
     const emojis = computeDhEmojiFingerprint(
       String(callerId || 'local'),
       String(calleeId || 'remote'),
       sessionId
     );
+
+    if (calleeId) {
+      fcmPushService
+        .sendIncomingCallPush(String(calleeId), {
+          callSessionId: sessionId,
+          callerId: String(callerId || 'local'),
+          callerName: String(callerName || 'TeleCall Caller'),
+          callerPhone: String(phone || ''),
+          dhEmojiFingerprint: emojis,
+        })
+        .catch(() => {});
+    }
 
     if (contactName && phone) {
       const newLog: CallLogEntry = {
