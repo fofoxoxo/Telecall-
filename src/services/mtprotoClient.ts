@@ -23,6 +23,23 @@ export interface MTProtoSessionData {
 
 const STRING_SESSION_STORAGE_KEY = 'telecall_mtproto_string_session';
 const BACKEND_URL_STORAGE_KEY = 'telecall_backend_server_url';
+const CUSTOM_TG_API_ID_KEY = 'telecall_custom_tg_api_id';
+const CUSTOM_TG_API_HASH_KEY = 'telecall_custom_tg_api_hash';
+
+export function getSavedTelegramCredentials(): { apiId: number; apiHash: string } {
+  const savedId = typeof window !== 'undefined' ? localStorage.getItem(CUSTOM_TG_API_ID_KEY) : null;
+  const savedHash = typeof window !== 'undefined' ? localStorage.getItem(CUSTOM_TG_API_HASH_KEY) : null;
+  return {
+    apiId: Number(savedId) || TELEGRAM_CONFIG.API_ID || 0,
+    apiHash: (savedHash && savedHash.trim()) || TELEGRAM_CONFIG.API_HASH || '',
+  };
+}
+
+export function saveTelegramCredentials(apiId: string, apiHash: string): void {
+  if (typeof window === 'undefined') return;
+  if (apiId.trim()) localStorage.setItem(CUSTOM_TG_API_ID_KEY, apiId.trim());
+  if (apiHash.trim()) localStorage.setItem(CUSTOM_TG_API_HASH_KEY, apiHash.trim());
+}
 
 export function getApiBaseUrl(): string {
   if (typeof window === 'undefined') return '';
@@ -219,15 +236,18 @@ export class ClientMTProtoEngine {
       deliveryMethod?: AuthDeliveryMethod;
       email?: string;
       isNewUser?: boolean;
+      forceResend?: boolean;
     }
   ): Promise<{
     ok: boolean;
     phoneCodeHash?: string;
+    deliveryType?: string;
     deliveryMethod?: AuthDeliveryMethod;
     error?: string;
   }> {
     const method: AuthDeliveryMethod =
       options?.deliveryMethod || (options?.isNewUser ? 'sms' : 'telegram_app');
+    const creds = getSavedTelegramCredentials();
     try {
       const res = await apiFetch('/api/auth/send-code', {
         method: 'POST',
@@ -236,16 +256,30 @@ export class ClientMTProtoEngine {
           phone: phone.trim(),
           email: options?.email?.trim(),
           deliveryMethod: method,
+          forceResend: options?.forceResend,
           isNewUser: options?.isNewUser,
-          apiId: TELEGRAM_CONFIG.API_ID,
-          apiHash: TELEGRAM_CONFIG.API_HASH,
+          apiId: creds.apiId,
+          apiHash: creds.apiHash,
         }),
       });
-      if (!res.ok) throw new Error('Static host fallback');
-      return await res.json();
-    } catch {
-      const hash = btoa(`${phone.trim()}:${TELEGRAM_CONFIG.API_ID}:${method}`).slice(0, 18);
-      return { ok: true, phoneCodeHash: hash, deliveryMethod: method };
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        return {
+          ok: false,
+          error: data.error || 'Could not send OTP from Telegram Data Center.',
+        };
+      }
+      return {
+        ok: true,
+        phoneCodeHash: data.phoneCodeHash,
+        deliveryType: data.deliveryType,
+        deliveryMethod: method,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Cannot reach backend server (${getApiBaseUrl() || 'local'}). Make sure your backend server is running and connected.`,
+      };
     }
   }
 
@@ -269,6 +303,7 @@ export class ClientMTProtoEngine {
     sessionData?: MTProtoSessionData;
     error?: string;
   }> {
+    const creds = getSavedTelegramCredentials();
     try {
       const res = await apiFetch('/api/auth/verify-code', {
         method: 'POST',
@@ -283,10 +318,9 @@ export class ClientMTProtoEngine {
           email: params.email?.trim(),
           twoFactorPassword: params.twoFactorPassword,
           require2FA: params.require2FA,
-          apiId: TELEGRAM_CONFIG.API_ID,
+          apiId: creds.apiId,
         }),
       });
-      if (!res.ok) throw new Error('Static host fallback');
       const data = await res.json();
       if (data.requires2FA) {
         return {
@@ -296,8 +330,8 @@ export class ClientMTProtoEngine {
           error: data.error,
         };
       }
-      if (!data.ok) {
-        return { ok: false, error: data.error || 'Invalid verification code.' };
+      if (!res.ok || !data.ok) {
+        return { ok: false, error: data.error || 'Invalid Telegram verification code.' };
       }
 
       const sessionData: MTProtoSessionData = {
@@ -308,7 +342,7 @@ export class ClientMTProtoEngine {
         phone: data.user.phone,
         name: data.user.name,
         username: data.user.username,
-        bio: data.user.bio || 'Available on TeleCall',
+        bio: data.user.bio || 'Synced with Official Telegram Account',
         email: data.user.email,
         twoFactorEnabled: Boolean(data.user.twoFactorEnabled),
         createdAt: Date.now(),
@@ -316,30 +350,11 @@ export class ClientMTProtoEngine {
 
       this.session.save(sessionData);
       return { ok: true, sessionData };
-    } catch {
-      if (params.require2FA && !params.twoFactorPassword) {
-        return {
-          ok: false,
-          requires2FA: true,
-          passwordHint: 'Telegram Cloud Password',
-        };
-      }
-      const fullName = [params.name.trim(), params.lastName?.trim()].filter(Boolean).join(' ') || 'TeleCall User';
-      const sessionData: MTProtoSessionData = {
-        dcId: TELEGRAM_CONFIG.DEFAULT_DC_ID,
-        authKeyHex: btoa(params.phone + ':' + Date.now()),
-        serverSalt: '7f3a9c1e5b2d8f4a',
-        userId: 'tg-user-' + btoa(params.phone).slice(0, 8),
-        phone: params.phone.trim(),
-        name: fullName,
-        username: '@' + (fullName.toLowerCase().replace(/[^a-z0-9]/g, '_') || 'telecall_user'),
-        bio: params.bio?.trim() || 'Available on TeleCall',
-        email: params.email?.trim(),
-        twoFactorEnabled: Boolean(params.twoFactorPassword || params.require2FA),
-        createdAt: Date.now(),
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Backend connection failed: ${(err as Error).message}`,
       };
-      this.session.save(sessionData);
-      return { ok: true, sessionData };
     }
   }
 

@@ -60,6 +60,10 @@ export {
   RealtimeSocketGateway,
   createFcmNotificationsRouter,
 } from './socketIoGateway';
+export {
+  realTelegramAuthBridge,
+  RealTelegramAuthBridge,
+} from './realTelegramAuth';
 
 /**
  * Step 2.4: Clean Modular Express Bridge Router (`/api/dc-media/*`)

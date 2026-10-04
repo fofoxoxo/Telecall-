@@ -12,6 +12,7 @@ import {
   createFcmNotificationsRouter,
   realtimeSocketGateway,
   fcmPushService,
+  realTelegramAuthBridge,
   handleSfuSignalingMessage,
   communityTopicEngine,
   offlineQueueManager,
@@ -366,80 +367,70 @@ async function startServer() {
     });
   });
 
-  // 1. Telegram Auth Step 1: Send OTP Code (`auth.sendCode` / `auth.resendCode` via Telegram App, SMS, Flash Call, or Email)
-  app.post('/api/auth/send-code', (req, res) => {
-    const { phone, email, deliveryMethod, isNewUser, apiId, apiHash } = req.body;
-    const effectiveApiId = apiId || process.env.TELEGRAM_API_ID || process.env.VITE_TELEGRAM_API_ID || '0';
-    const effectiveApiHash = apiHash || process.env.TELEGRAM_API_HASH || process.env.VITE_TELEGRAM_API_HASH || 'telecall-secret-hash';
+  // 1. Telegram Auth Step 1: Real GramJS MTProto `auth.SendCode` / `auth.ResendCode`
+  app.post('/api/auth/send-code', async (req, res) => {
+    const { phone, deliveryMethod, forceResend, apiId, apiHash } = req.body;
 
     if (!phone || String(phone).trim().length < 7) {
-      res.status(400).json({ error: 'Valid phone number is required.' });
+      res.status(400).json({ ok: false, error: 'Valid phone number is required.' });
       return;
     }
 
-    const method = deliveryMethod || (isNewUser ? 'sms' : 'telegram_app');
-    const phoneCodeHash = crypto
-      .createHmac('sha256', String(effectiveApiHash))
-      .update(String(phone) + ':' + String(effectiveApiId) + ':' + String(method))
-      .digest('hex')
-      .slice(0, 18);
-
-    res.json({
-      ok: true,
-      phoneCodeHash,
-      deliveryMethod: method,
-      emailSentTo: method === 'email' ? String(email || '') : undefined,
-      nextType: method === 'sms' ? 'phone_call' : 'sms',
+    const realResult = await realTelegramAuthBridge.sendRealCode({
+      phone: String(phone),
+      apiId,
+      apiHash,
+      forceResend: Boolean(forceResend || deliveryMethod === 'sms' || deliveryMethod === 'phone_call'),
     });
+
+    if (!realResult.ok) {
+      res.status(400).json(realResult);
+      return;
+    }
+
+    res.json(realResult);
   });
 
-  // 2. Telegram Auth Step 2: Verify Code, Optional 2FA Cloud Password (`auth.checkPassword`), or New User Sign Up (`auth.signUp`)
-  app.post('/api/auth/verify-code', (req, res) => {
+  // 2. Telegram Auth Step 2: Real GramJS MTProto `auth.SignIn`, `auth.CheckPassword` (2FA SRP), or `auth.SignUp`
+  app.post('/api/auth/verify-code', async (req, res) => {
     const {
       phone,
       code,
       phoneCodeHash,
       name,
       lastName,
-      bio,
-      email,
       twoFactorPassword,
-      require2FA,
     } = req.body;
 
-    if (!phone || !code || !phoneCodeHash) {
-      res.status(400).json({ error: 'Phone number and verification code are required.' });
+    if (!phone || (!code && !twoFactorPassword)) {
+      res.status(400).json({ ok: false, error: 'Phone number and verification code are required.' });
       return;
     }
 
-    // If user enabled 2FA check and has not yet supplied their Telegram 2FA Cloud Password
-    if (require2FA && !twoFactorPassword) {
-      res.json({
-        ok: false,
-        requires2FA: true,
-        passwordHint: 'Your Telegram Cloud Password',
-        error: 'SESSION_PASSWORD_NEEDED',
-      });
+    const verifyResult = await realTelegramAuthBridge.verifyRealCode({
+      phone: String(phone),
+      code: String(code || ''),
+      phoneCodeHash: String(phoneCodeHash || ''),
+      firstName: name,
+      lastName,
+      twoFactorPassword,
+    });
+
+    if (verifyResult.requires2FA) {
+      res.json(verifyResult);
       return;
     }
 
-    const fullName = [name?.trim(), lastName?.trim()].filter(Boolean).join(' ') || 'TeleCall User';
-    const userId = 'tg-user-' + crypto.createHash('md5').update(String(phone)).digest('hex').slice(0, 8);
-    const authKeyHex = crypto.createHash('sha256').update(userId + ':' + phoneCodeHash).digest('hex');
+    if (!verifyResult.ok || !verifyResult.user) {
+      res.status(400).json(verifyResult);
+      return;
+    }
 
     res.json({
       ok: true,
-      authKeyHex,
+      authKeyHex: verifyResult.stringSession || 'mtproto-live-session',
       serverSalt: crypto.randomBytes(8).toString('hex'),
-      user: {
-        id: userId,
-        name: fullName,
-        phone: String(phone),
-        username: '@' + (fullName.toLowerCase().replace(/[^a-z0-9]/g, '_') || 'telecall_user'),
-        bio: String(bio || 'Available on TeleCall (MTProto Low-Latency Voice)'),
-        email: email ? String(email) : undefined,
-        twoFactorEnabled: Boolean(twoFactorPassword || require2FA),
-      },
+      user: verifyResult.user,
     });
   });
 

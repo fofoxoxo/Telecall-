@@ -15,7 +15,9 @@ import {
 import {
   apiFetch,
   getApiBaseUrl,
-  setApiBaseUrl
+  setApiBaseUrl,
+  getSavedTelegramCredentials,
+  saveTelegramCredentials
 } from '../services/mtprotoClient';
 
 export type AppThemeId = 'telegram-dark' | 'midnight-oled' | 'emerald-night' | 'light-clean';
@@ -100,6 +102,15 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
 }) => {
   const [backendUrlInput, setBackendUrlInput] = useState<string>(() => getApiBaseUrl());
   const [savedUrlNotice, setSavedUrlNotice] = useState(false);
+  const [tgApiIdInput, setTgApiIdInput] = useState<string>(() => {
+    const c = getSavedTelegramCredentials();
+    return c.apiId ? String(c.apiId) : '';
+  });
+  const [tgApiHashInput, setTgApiHashInput] = useState<string>(() => {
+    const c = getSavedTelegramCredentials();
+    return c.apiHash || '';
+  });
+  const [savedCredsNotice, setSavedCredsNotice] = useState(false);
   const [diagnosticResult, setDiagnosticResult] = useState<string>('');
   const [runningAction, setRunningAction] = useState<string | null>(null);
   const [preferredBitrateTier, setPreferredBitrateTier] = useState<
@@ -256,6 +267,39 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                 {savedUrlNotice ? 'Saved!' : 'Save URL'}
               </button>
             </form>
+
+            <div className={`pt-3 border-t ${palette.border} space-y-2`}>
+              <div className="text-xs font-semibold">
+                Telegram MTProto API Credentials (For Real OTP Delivery)
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <input
+                  type="text"
+                  placeholder="API_ID (e.g. 30428833)"
+                  value={tgApiIdInput}
+                  onChange={(e) => setTgApiIdInput(e.target.value)}
+                  className={`h-10 px-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs font-mono`}
+                />
+                <input
+                  type="password"
+                  placeholder="API_HASH (32-char hex)"
+                  value={tgApiHashInput}
+                  onChange={(e) => setTgApiHashInput(e.target.value)}
+                  className={`h-10 px-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs font-mono`}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  saveTelegramCredentials(tgApiIdInput, tgApiHashInput);
+                  setSavedCredsNotice(true);
+                  setTimeout(() => setSavedCredsNotice(false), 2000);
+                }}
+                className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-emerald-500 text-slate-950 text-xs font-semibold"
+              >
+                {savedCredsNotice ? 'Credentials Saved!' : 'Save Telegram API Keys'}
+              </button>
+            </div>
           </section>
 
           {/* 4. Live Backend Feature Verification Utilities (Steps 1–6) */}

@@ -566,7 +566,7 @@ export default function App() {
     if (res.ok && res.phoneCodeHash) {
       setPhoneCodeHash(res.phoneCodeHash);
       setDeliveryMethod(chosenMethod);
-      setOtpInput('54921');
+      setOtpInput('');
       setAuthStep('otp');
     } else {
       setAuthError(res.error || 'Could not send Telegram verification code.');
