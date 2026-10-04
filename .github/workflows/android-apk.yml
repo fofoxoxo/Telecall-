@@ -1,53 +1,93 @@
-name: Deploy Webview Preview (GitHub Pages)
+name: TeleCall Main Branch — WebView & Dev APK Builder
 
 on:
   push:
     branches:
-      - dev
+      - main
   workflow_dispatch:
-
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
+    inputs:
+      webview_url:
+        description: 'Live Server URL for WebView APK'
+        required: false
+        default: 'https://ais-pre-xfn5k5hyj4aiqlwlaul5tn-771261258696.asia-southeast1.run.app'
 
 jobs:
-  deploy-webview-preview:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  build-apks:
+    name: Build WebView & Dev APKs (Main Branch)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
-      - name: Checkout Code
+      - name: Checkout Main Branch
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 22.x
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: '22.x'
+          node-version: '22'
 
-      - name: Install Dependencies
-        run: |
-          npm install --legacy-peer-deps --no-audit --no-fund
-
-      - name: Build Web Application for GitHub Pages
-        run: |
-          REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
-          echo "Building with VITE_BASE=/${REPO_NAME}/"
-          export VITE_BASE="/${REPO_NAME}/"
-          npm run build
-          touch dist/.nojekyll
-
-      - name: Upload Pages Artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Setup Java JDK 21 (Required by Capacitor 8 / AGP 8)
+        uses: actions/setup-java@v4
         with:
-          path: './dist'
+          distribution: 'temurin'
+          java-version: '21'
 
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Configure Pre-Installed Android SDK & Accept Licenses
+        run: |
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+
+      - name: Install NPM Dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Build Frontend Bundle (Vite)
+        env:
+          VITE_TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          VITE_TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          VITE_WEBVIEW_SERVER_URL: ${{ github.event.inputs.webview_url || secrets.WEBVIEW_SERVER_URL || 'https://ais-pre-xfn5k5hyj4aiqlwlaul5tn-771261258696.asia-southeast1.run.app' }}
+        run: npm run build
+
+      - name: Initialize Capacitor Android Platform
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+
+      - name: Inject Android Audio, Microphone & Contact Permissions
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ] && ! grep -q "android.permission.RECORD_AUDIO" "$MANIFEST"; then
+            sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <uses-permission android:name="android.permission.BLUETOOTH" />\n    <uses-permission android:name="android.permission.READ_CONTACTS" />' "$MANIFEST"
+          fi
+
+      - name: Build 1 — Dev APK (Standalone Bundled App)
+        env:
+          BUILD_ENV: 'dev'
+          WEBVIEW_SERVER_URL: ''
+        run: |
+          npx cap sync android
+          chmod +x android/gradlew
+          cd android && ./gradlew assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk ../telecall-dev.apk
+
+      - name: Build 2 — WebView APK (Live Connected to Server URL)
+        env:
+          BUILD_ENV: 'dev'
+          WEBVIEW_SERVER_URL: ${{ github.event.inputs.webview_url || secrets.WEBVIEW_SERVER_URL || 'https://ais-pre-xfn5k5hyj4aiqlwlaul5tn-771261258696.asia-southeast1.run.app' }}
+        run: |
+          npx cap sync android
+          cd android && ./gradlew assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk ../telecall-webview.apk
+
+      - name: Upload WebView & Dev APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: telecall-main-apks
+          path: |
+            telecall-dev.apk
+            telecall-webview.apk
+          retention-days: 30
