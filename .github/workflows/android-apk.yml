@@ -1,4 +1,4 @@
-name: TeleCall Android APK Builder (Main, Dev WebView & Production Signed)
+name: TeleCall Android WebView & Dev APK Builder
 
 on:
   push:
@@ -11,23 +11,14 @@ on:
       - dev
   workflow_dispatch:
     inputs:
-      build_mode:
-        description: 'Select APK Type: debug (main), dev-webview (live reload), or production-release (signed)'
-        required: true
-        default: 'dev-webview'
-        type: choice
-        options:
-          - debug
-          - dev-webview
-          - production-release
       webview_url:
-        description: 'Live Server / WebView URL (Optional - used for dev-webview APK)'
+        description: 'Live Server / WebView URL for WebView APK'
         required: false
         default: 'https://ais-pre-xfn5k5hyj4aiqlwlaul5tn-771261258696.asia-southeast1.run.app'
 
 jobs:
-  build-android-apk:
-    name: Build TeleCall Android APK
+  build-webview-and-dev-apk:
+    name: Build WebView APK & Dev APK
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -36,11 +27,10 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 22
+      - name: Setup Node.js 22 (No Lockfile Required)
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
 
       - name: Setup Java JDK 17
         uses: actions/setup-java@v4
@@ -52,81 +42,52 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install NPM Dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
-      - name: Determine Build Environment & WebView Config
-        id: config
-        run: |
-          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
-          MODE="${{ github.event.inputs.build_mode }}"
-          if [ -z "$MODE" ]; then
-            if [ "$BRANCH_NAME" = "dev" ]; then
-              MODE="dev-webview"
-            else
-              MODE="debug"
-            fi
-          fi
-          echo "mode=$MODE" >> $GITHUB_OUTPUT
-          echo "branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
-
-      - name: Build Web Bundle (Vite)
+      - name: Build Frontend Bundle (Vite)
         env:
           VITE_TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           VITE_TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           VITE_WEBVIEW_SERVER_URL: ${{ github.event.inputs.webview_url || secrets.WEBVIEW_SERVER_URL || 'https://ais-pre-xfn5k5hyj4aiqlwlaul5tn-771261258696.asia-southeast1.run.app' }}
         run: npm run build
 
-      - name: Initialize & Sync Capacitor Android Platform
-        env:
-          BUILD_ENV: ${{ steps.config.outputs.mode == 'dev-webview' && 'dev' || 'main' }}
-          WEBVIEW_SERVER_URL: ${{ steps.config.outputs.mode == 'dev-webview' && (github.event.inputs.webview_url || secrets.WEBVIEW_SERVER_URL) || '' }}
+      - name: Initialize Capacitor Android Project
         run: |
           if [ ! -d "android" ]; then
             npx cap add android
           fi
-          npx cap sync android
 
-      - name: Inject Android Microphone, Audio & Internet Permissions
+      - name: Inject Android Audio, Microphone & Contact Permissions
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST" ]; then
-            sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <uses-permission android:name="android.permission.BLUETOOTH" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.READ_CONTACTS" />' "$MANIFEST"
+          if [ -f "$MANIFEST" ] && ! grep -q "android.permission.RECORD_AUDIO" "$MANIFEST"; then
+            sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <uses-permission android:name="android.permission.BLUETOOTH" />\n    <uses-permission android:name="android.permission.READ_CONTACTS" />' "$MANIFEST"
           fi
 
-      - name: Build Debug / Dev-WebView APK
-        if: steps.config.outputs.mode != 'production-release'
-        working-directory: ./android
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug
-          cp app/build/outputs/apk/debug/app-debug.apk ../telecall-${{ steps.config.outputs.branch }}-${{ steps.config.outputs.mode }}.apk
-
-      - name: Sign & Build Production Release APK
-        if: steps.config.outputs.mode == 'production-release'
-        working-directory: ./android
+      - name: Build 1 — Standalone Dev APK (Bundled Assets)
         env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || 'telecall123' }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || 'telecall-key' }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || 'telecall123' }}
+          BUILD_ENV: 'dev'
+          WEBVIEW_SERVER_URL: ''
         run: |
-          chmod +x gradlew
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 --decode > release-key.jks
-          else
-            # Auto-generate self-signed production keystore if user hasn't uploaded one yet on phone
-            keytool -genkey -v -keystore release-key.jks -keyalg RSA -keysize 2048 -validity 10000 -alias "$KEY_ALIAS" -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" -dname "CN=TeleCall, OU=Mobile, O=TeleCall, L=Mumbai, S=MH, C=IN"
-          fi
-          ./gradlew assembleRelease \
-            -Pandroid.injected.signing.store.file=$(pwd)/release-key.jks \
-            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
-            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
-            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
-          cp app/build/outputs/apk/release/app-release.apk ../telecall-production-signed.apk
+          npx cap sync android
+          chmod +x android/gradlew
+          cd android && ./gradlew assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk ../telecall-dev-debug.apk
 
-      - name: Upload APK Artifact (Download directly on Android Phone)
+      - name: Build 2 — Live WebView APK (Connected to Live Server URL)
+        env:
+          BUILD_ENV: 'dev'
+          WEBVIEW_SERVER_URL: ${{ github.event.inputs.webview_url || secrets.WEBVIEW_SERVER_URL || 'https://ais-pre-xfn5k5hyj4aiqlwlaul5tn-771261258696.asia-southeast1.run.app' }}
+        run: |
+          npx cap sync android
+          cd android && ./gradlew assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk ../telecall-webview-debug.apk
+
+      - name: Upload WebView & Dev APKs (Download on Phone)
         uses: actions/upload-artifact@v4
         with:
-          name: telecall-apk-${{ steps.config.outputs.branch }}-${{ steps.config.outputs.mode }}
-          path: '*.apk'
+          name: telecall-android-apks
+          path: |
+            telecall-dev-debug.apk
+            telecall-webview-debug.apk
           retention-days: 30

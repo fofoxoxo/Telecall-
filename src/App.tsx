@@ -22,7 +22,8 @@ import {
   Share2,
   Delete,
   Globe,
-  Link2
+  Link2,
+  BookOpen
 } from 'lucide-react';
 import { mtprotoEngine, MTProtoSessionData } from './services/mtprotoClient';
 
@@ -98,7 +99,7 @@ export default function App() {
     mtprotoEngine.getSavedSession()
   );
 
-  // Login Flow States (when no StringSession is saved, or user switches account)
+  // Login Flow States
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
   const [authStep, setAuthStep] = useState<'phone' | 'otp'>('phone');
   const [phoneInput, setPhoneInput] = useState('+91 ');
@@ -108,7 +109,6 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
 
-  // Active User Derived from MTProto StringSession (or immediate guest session until logged in)
   const currentUser = session || {
     dcId: 4,
     authKeyHex: 'default',
@@ -123,7 +123,7 @@ export default function App() {
   // Bottom Navigation (Strictly 2 tabs: 'calls' and 'rooms')
   const [activeBottomTab, setActiveBottomTab] = useState<'calls' | 'rooms'>('calls');
 
-  // Sub-navigation inside Calls tab: Call Logs, Contacts, Dialer
+  // Floating Switcher above footer inside Calls tab: Call Logs, Contacts, Dialer
   const [callsSubTab, setCallsSubTab] = useState<'logs' | 'contacts' | 'dialer'>('logs');
   const [dialedNumber, setDialedNumber] = useState('+91 ');
 
@@ -166,7 +166,6 @@ export default function App() {
 
   const audioCtxRef = useRef<AudioContext | null>(null);
 
-  // Start Persistent Client-Side MTProto Engine & Handle Deep-Linked Private Room URL (`?room=xxxx`)
   useEffect(() => {
     mtprotoEngine.initPersistentConnection();
 
@@ -225,7 +224,6 @@ export default function App() {
     };
   }, [currentUser.userId, currentUser.name, currentUser.phone]);
 
-  // Call duration timer
   useEffect(() => {
     if (!activeCall) {
       setCallSeconds(0);
@@ -267,7 +265,6 @@ export default function App() {
     setTimeout(() => setCopiedId(null), 1800);
   };
 
-  // Start 1-on-1 E2EE Call
   const startCall = async (contactName: string, phone: string, calleeId = 'remote') => {
     if (!phone.trim()) return;
     playTone(540, 0.14);
@@ -305,7 +302,6 @@ export default function App() {
     }
   };
 
-  // Telegram Login Step 1: Send Code via MTProto Engine
   const handleSendOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
@@ -321,7 +317,6 @@ export default function App() {
     }
   };
 
-  // Telegram Login Step 2: Verify Code & Save StringSession
   const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
@@ -342,7 +337,6 @@ export default function App() {
     }
   };
 
-  // Sync Contacts
   const handleSyncContacts = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setSyncingContacts(true);
@@ -366,7 +360,6 @@ export default function App() {
     }
   };
 
-  // Create Public or Private Voice Room
   const handleCreateRoom = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newRoomTitle.trim()) return;
@@ -398,7 +391,6 @@ export default function App() {
     }
   };
 
-  // Join Voice Room
   const handleJoinRoom = async (room: VoiceRoom) => {
     playTone(580, 0.12);
     const res = await fetch(`/api/rooms/${room.id}/join`, {
@@ -417,7 +409,6 @@ export default function App() {
     }
   };
 
-  // Join Private Room via Invite Link or Code
   const handleJoinByInviteLink = async (e: React.FormEvent) => {
     e.preventDefault();
     setInviteError('');
@@ -446,7 +437,6 @@ export default function App() {
     }
   };
 
-  // Voice Room Actions (Mute, Raise Hand, Promote Speaker, Update Rules, Leave)
   const handleRoomAction = async (
     roomId: string,
     action: string,
@@ -469,9 +459,6 @@ export default function App() {
     }
   };
 
-  // Filter Voice Rooms:
-  // - Public rooms appear in search & topic list
-  // - Private rooms ONLY appear if created by current user OR if user typed the exact invite code
   const visibleRooms = rooms.filter((r) => {
     const q = roomSearchQuery.trim().toLowerCase();
     const isCreator = r.hostId === currentUser.userId;
@@ -513,12 +500,12 @@ export default function App() {
             onClick={() => setShowAuthModal(true)}
             className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition-colors whitespace-nowrap"
           >
-            {session ? `${session.name} (${session.phone})` : 'Telegram Sign In'}
+            {session ? `${session.name}` : 'Telegram Sign In'}
           </button>
         </header>
       ) : (
         /* Voice Rooms Header with Topic Search + Create Voice Room right next to it */
-        <header className="sticky top-0 z-30 px-4 py-2.5 bg-[#111b21]/95 backdrop-blur-md border-b border-slate-800 flex items-center gap-2.5">
+        <header className="sticky top-0 z-30 px-4 py-2.5 bg-[#111b21]/95 backdrop-blur-md border-b border-slate-800 flex items-center gap-2">
           <div className="relative flex-1">
             <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
             <input
@@ -535,7 +522,7 @@ export default function App() {
             className="min-h-[40px] px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 shrink-0 whitespace-nowrap"
           >
             <Link2 className="w-3.5 h-3.5" />
-            <span>Join Link</span>
+            <span>Link</span>
           </button>
 
           <button
@@ -543,13 +530,13 @@ export default function App() {
             className="min-h-[40px] px-3.5 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs flex items-center gap-1.5 shrink-0 whitespace-nowrap"
           >
             <Plus className="w-4 h-4" />
-            <span>Create Room</span>
+            <span>Create</span>
           </button>
         </header>
       )}
 
       {/* Main Scrollable Viewport */}
-      <main className="flex-1 px-4 py-4 pb-24">
+      <main className="flex-1 px-4 py-4 pb-36">
         {/* ACTIVE VOICE ROOM FULL SCREEN STAGE */}
         {activeJoinedRoom ? (
           <div className="bg-[#111b21] border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-5">
@@ -560,7 +547,7 @@ export default function App() {
                   className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-white mb-1.5"
                 >
                   <ArrowLeft className="w-4 h-4" />
-                  <span>Back to Rooms</span>
+                  <span>Back to Voice Rooms</span>
                 </button>
                 <h1 className="text-lg font-bold text-white leading-snug">
                   {activeJoinedRoom.title}
@@ -577,7 +564,14 @@ export default function App() {
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
-                {/* Copy Invite Link button (essential for Private Rooms) */}
+                <button
+                  onClick={() => setRoomPreviewRules(activeJoinedRoom)}
+                  className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 whitespace-nowrap"
+                >
+                  <BookOpen className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Rules</span>
+                </button>
+
                 <button
                   onClick={() =>
                     copyToClipboard(
@@ -590,12 +584,12 @@ export default function App() {
                   {copiedId === 'room-link' ? (
                     <>
                       <Check className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>Link Copied</span>
+                      <span>Copied</span>
                     </>
                   ) : (
                     <>
                       <Share2 className="w-3.5 h-3.5" />
-                      <span>Invite Link</span>
+                      <span>Share</span>
                     </>
                   )}
                 </button>
@@ -609,10 +603,12 @@ export default function App() {
               </div>
             </div>
 
-            {/* Room Rules */}
-            <div className="p-3.5 rounded-xl bg-[#0b141a] border border-slate-800/90">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-xs font-semibold text-slate-300">Room Rules</span>
+            {/* Speakers Stage */}
+            <div>
+              <div className="flex items-center justify-between mb-2.5">
+                <h2 className="text-xs font-semibold text-slate-400">
+                  Speakers ({activeJoinedRoom.participants.filter((p) => p.role !== 'listener').length})
+                </h2>
                 {activeJoinedRoom.hostId === currentUser.userId && (
                   <button
                     onClick={() => {
@@ -622,24 +618,10 @@ export default function App() {
                     }}
                     className="text-xs text-sky-400 hover:underline"
                   >
-                    Edit Rules
+                    Edit Topic & Rules
                   </button>
                 )}
               </div>
-              <ul className="space-y-1 text-xs text-slate-400">
-                {activeJoinedRoom.rules.map((rule, idx) => (
-                  <li key={idx}>
-                    {idx + 1}. {rule}
-                  </li>
-                ))}
-              </ul>
-            </div>
-
-            {/* Speakers Stage */}
-            <div>
-              <h2 className="text-xs font-semibold text-slate-400 mb-2.5">
-                Speakers ({activeJoinedRoom.participants.filter((p) => p.role !== 'listener').length})
-              </h2>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
                 {activeJoinedRoom.participants
                   .filter((p) => p.role === 'host' || p.role === 'speaker')
@@ -768,40 +750,6 @@ export default function App() {
             {/* BOTTOM TAB 1: CALLS (Call Logs, Contacts, Dialer) */}
             {activeBottomTab === 'calls' && (
               <div className="space-y-4">
-                {/* Segmented Switcher: Call Logs | Contacts | Dialer */}
-                <div className="grid grid-cols-3 gap-1 p-1 bg-[#111b21] border border-slate-800 rounded-xl">
-                  <button
-                    onClick={() => setCallsSubTab('logs')}
-                    className={`min-h-[38px] rounded-lg text-xs font-semibold transition-colors ${
-                      callsSubTab === 'logs'
-                        ? 'bg-sky-500 text-slate-950'
-                        : 'text-slate-300 hover:text-white'
-                    }`}
-                  >
-                    Call Logs
-                  </button>
-                  <button
-                    onClick={() => setCallsSubTab('contacts')}
-                    className={`min-h-[38px] rounded-lg text-xs font-semibold transition-colors ${
-                      callsSubTab === 'contacts'
-                        ? 'bg-sky-500 text-slate-950'
-                        : 'text-slate-300 hover:text-white'
-                    }`}
-                  >
-                    Contacts
-                  </button>
-                  <button
-                    onClick={() => setCallsSubTab('dialer')}
-                    className={`min-h-[38px] rounded-lg text-xs font-semibold transition-colors ${
-                      callsSubTab === 'dialer'
-                        ? 'bg-sky-500 text-slate-950'
-                        : 'text-slate-300 hover:text-white'
-                    }`}
-                  >
-                    Dialer
-                  </button>
-                </div>
-
                 {/* Sub-Tab A: Call Logs */}
                 {callsSubTab === 'logs' && (
                   <div className="bg-[#111b21] border border-slate-800 rounded-2xl divide-y divide-slate-800/80">
@@ -859,7 +807,7 @@ export default function App() {
                             syncingContacts ? 'animate-spin text-sky-400' : ''
                           }`}
                         />
-                        <span>{syncingContacts ? 'Syncing...' : 'Sync Telegram Contacts'}</span>
+                        <span>{syncingContacts ? 'Syncing...' : 'Sync Contacts'}</span>
                       </button>
 
                       <button
@@ -943,8 +891,8 @@ export default function App() {
 
                 {/* Sub-Tab C: Keypad Dialer */}
                 {callsSubTab === 'dialer' && (
-                  <div className="p-5 rounded-2xl bg-[#111b21] border border-slate-800 max-w-sm mx-auto space-y-5">
-                    <div className="flex items-center justify-between bg-[#0b141a] border border-slate-800 rounded-xl px-4 h-14">
+                  <div className="p-5 rounded-2xl bg-[#111b21] border border-slate-800 max-w-sm mx-auto space-y-4">
+                    <div className="flex items-center justify-between bg-[#0b141a] border border-slate-800 rounded-xl px-4 h-13">
                       <input
                         type="tel"
                         value={dialedNumber}
@@ -959,7 +907,7 @@ export default function App() {
                       </button>
                     </div>
 
-                    <div className="grid grid-cols-3 gap-3">
+                    <div className="grid grid-cols-3 gap-2.5">
                       {DIAL_KEYS.map((digit) => (
                         <button
                           key={digit}
@@ -967,7 +915,7 @@ export default function App() {
                             playTone(600, 0.05);
                             setDialedNumber((prev) => prev + digit);
                           }}
-                          className="h-14 rounded-2xl bg-[#0b141a] hover:bg-slate-800 border border-slate-800/80 text-lg font-semibold text-white active:scale-95 transition-transform tabular-nums"
+                          className="h-13 rounded-2xl bg-[#0b141a] hover:bg-slate-800 border border-slate-800/80 text-lg font-semibold text-white active:scale-95 transition-transform tabular-nums"
                         >
                           {digit}
                         </button>
@@ -976,17 +924,17 @@ export default function App() {
 
                     <button
                       onClick={() => startCall(dialedNumber, dialedNumber, dialedNumber)}
-                      className="w-full h-14 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm flex items-center justify-center gap-2"
+                      className="w-full h-13 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm flex items-center justify-center gap-2"
                     >
                       <Phone className="w-5 h-5" />
-                      <span>Call via TeleCall</span>
+                      <span>Call</span>
                     </button>
                   </div>
                 )}
               </div>
             )}
 
-            {/* BOTTOM TAB 2: VOICE ROOMS */}
+            {/* BOTTOM TAB 2: VOICE ROOMS (Clean list showing Room Name, Topic & Active Users without inline rules bar) */}
             {activeBottomTab === 'rooms' && (
               <div className="space-y-4">
                 {/* Horizontal Topic Filter Bar */}
@@ -1006,70 +954,61 @@ export default function App() {
                   ))}
                 </div>
 
-                {/* Voice Rooms List (Name, Topic, Active Users) */}
+                {/* Voice Rooms List: Only Room Name, Topic, Active Users, and Join Action */}
                 <div className="space-y-3">
                   {visibleRooms.map((room) => (
                     <div
                       key={room.id}
-                      className="p-4 rounded-2xl bg-[#111b21] border border-slate-800 flex flex-col gap-3"
+                      className="p-4 rounded-2xl bg-[#111b21] border border-slate-800 flex items-center justify-between gap-3"
                     >
-                      <div>
-                        <div className="flex items-center justify-between gap-2 text-xs text-slate-400 mb-1 tabular-nums">
-                          <span className="text-sky-400 font-medium">{room.topic}</span>
-                          <span>
-                            {room.visibility === 'private' ? 'Private (Link Only) · ' : ''}
-                            {room.listenerCount.toLocaleString()} active users
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 text-xs text-slate-400 mb-1 tabular-nums">
+                          <span className="text-sky-400 font-medium truncate">{room.topic}</span>
+                          <span>·</span>
+                          <span className="shrink-0">
+                            {room.listenerCount.toLocaleString()} active
                           </span>
+                          {room.visibility === 'private' && (
+                            <>
+                              <span>·</span>
+                              <span className="text-amber-400 shrink-0">Private</span>
+                            </>
+                          )}
                         </div>
-                        <h2 className="text-base font-bold text-white leading-snug">
+                        <h2 className="text-base font-bold text-white leading-snug truncate">
                           {room.title}
                         </h2>
-                        <div className="text-xs text-slate-400 mt-1">
-                          Host: <span className="text-slate-200">{room.hostName}</span>
+                        <div className="text-xs text-slate-400 mt-0.5 truncate">
+                          Host: <span className="text-slate-300">{room.hostName}</span>
                         </div>
                       </div>
 
-                      <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800/80">
-                        <button
-                          onClick={() => setRoomPreviewRules(room)}
-                          className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-800 text-xs font-medium text-slate-300"
-                        >
-                          Rules ({room.rules.length})
-                        </button>
-
-                        <div className="flex items-center gap-2">
-                          {room.visibility === 'private' && (
-                            <button
-                              onClick={() =>
-                                copyToClipboard(
-                                  room.id,
-                                  `${window.location.origin}/?room=${room.inviteCode}`
-                                )
-                              }
-                              className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-800 text-xs font-medium text-sky-300 flex items-center gap-1"
-                            >
-                              {copiedId === room.id ? (
-                                <>
-                                  <Check className="w-3.5 h-3.5 text-emerald-400" />
-                                  <span>Copied</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Copy className="w-3.5 h-3.5" />
-                                  <span>Copy Link</span>
-                                </>
-                              )}
-                            </button>
-                          )}
-
+                      <div className="flex items-center gap-2 shrink-0">
+                        {room.visibility === 'private' && (
                           <button
-                            onClick={() => handleJoinRoom(room)}
-                            className="min-h-[40px] px-4 py-1.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs flex items-center gap-1.5"
+                            onClick={() =>
+                              copyToClipboard(
+                                room.id,
+                                `${window.location.origin}/?room=${room.inviteCode}`
+                              )
+                            }
+                            className="min-h-[42px] px-3 py-2 rounded-xl bg-slate-800 text-xs font-medium text-sky-300 flex items-center gap-1"
                           >
-                            <Radio className="w-3.5 h-3.5" />
-                            <span>Join Room</span>
+                            {copiedId === room.id ? (
+                              <Check className="w-4 h-4 text-emerald-400" />
+                            ) : (
+                              <Copy className="w-4 h-4" />
+                            )}
                           </button>
-                        </div>
+                        )}
+
+                        <button
+                          onClick={() => handleJoinRoom(room)}
+                          className="min-h-[42px] px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs flex items-center gap-1.5 whitespace-nowrap"
+                        >
+                          <Radio className="w-3.5 h-3.5" />
+                          <span>Join</span>
+                        </button>
                       </div>
                     </div>
                   ))}
@@ -1079,6 +1018,44 @@ export default function App() {
           </>
         )}
       </main>
+
+      {/* FLOATING CALLS SUB-NAVIGATION BAR ABOVE FOOTER (Call Logs | Contacts | Dialer) */}
+      {activeBottomTab === 'calls' && !activeJoinedRoom && (
+        <div className="fixed bottom-19 left-0 right-0 z-30 flex justify-center px-4 pointer-events-none">
+          <div className="pointer-events-auto bg-[#111b21]/95 backdrop-blur-md border border-slate-700/80 shadow-xl rounded-2xl p-1 flex items-center gap-1">
+            <button
+              onClick={() => setCallsSubTab('logs')}
+              className={`min-h-[38px] px-4 py-1.5 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
+                callsSubTab === 'logs'
+                  ? 'bg-sky-500 text-slate-950'
+                  : 'text-slate-300 hover:text-white'
+              }`}
+            >
+              Call Logs
+            </button>
+            <button
+              onClick={() => setCallsSubTab('contacts')}
+              className={`min-h-[38px] px-4 py-1.5 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
+                callsSubTab === 'contacts'
+                  ? 'bg-sky-500 text-slate-950'
+                  : 'text-slate-300 hover:text-white'
+              }`}
+            >
+              Contacts
+            </button>
+            <button
+              onClick={() => setCallsSubTab('dialer')}
+              className={`min-h-[38px] px-4 py-1.5 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
+                callsSubTab === 'dialer'
+                  ? 'bg-sky-500 text-slate-950'
+                  : 'text-slate-300 hover:text-white'
+              }`}
+            >
+              Dialer
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* MODAL: Create Voice Room (Public or Private) */}
       {showCreateRoomModal && (
@@ -1225,7 +1202,7 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL: Room Rules Preview */}
+      {/* MODAL: Room Rules Popup (Only when user clicks Rules inside room) */}
       {roomPreviewRules && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-[#111b21] border border-slate-800 rounded-2xl max-w-sm w-full p-5 space-y-4">
@@ -1246,12 +1223,6 @@ export default function App() {
                 className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-800 text-xs text-slate-300"
               >
                 Close
-              </button>
-              <button
-                onClick={() => handleJoinRoom(roomPreviewRules)}
-                className="min-h-[40px] px-4 py-2 rounded-xl bg-sky-500 text-slate-950 text-xs font-semibold"
-              >
-                Accept & Join
               </button>
             </div>
           </div>
