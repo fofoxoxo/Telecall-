@@ -31,10 +31,10 @@ const envApiHash =
 
 export const TELEGRAM_CONFIG = {
   // 👇 YAHAN APNA TELEGRAM API_ID (Number) INSERT KAREIN 👇
-  API_ID: Number(envApiId) || 28419022,
+  API_ID: Number(envApiId) || 30428833,
 
   // 👇 YAHAN APNA TELEGRAM API_HASH (32-char String) INSERT KAREIN 👇
-  API_HASH: String(envApiHash || '9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c'),
+  API_HASH: String(envApiHash || '41c474aebd7507799bd322e7517286c2'),
 
   // Default Telegram Production Data Center (DC5 Singapore / India ya DC4 Amsterdam)
   DEFAULT_DC_ID: 5 as 1 | 2 | 3 | 4 | 5,
