@@ -42,6 +42,7 @@ import {
   AuthDeliveryMethod,
   apiFetch
 } from './services/mtprotoClient';
+import { tdlibClientEngine } from './services/tdlibClient';
 import {
   SettingsDrawer,
   AppThemeId,
@@ -656,6 +657,18 @@ export default function App() {
         ? [{ name: newContactName.trim(), phone: newContactPhone.trim() }]
         : [];
     try {
+      // 1. Try syncing real contacts directly from local TDLib SQLite/IndexedDB engine
+      const tdContacts = await tdlibClientEngine.getTdlibContacts();
+      if (tdContacts && tdContacts.length > 0) {
+        setContacts((prev) => {
+          const merged = [...tdContacts, ...prev];
+          return merged.filter(
+            (v, idx, arr) => arr.findIndex((item) => item.phone === v.phone) === idx
+          );
+        });
+      }
+
+      // 2. Also sync with backend directory
       const res = await apiFetch('/api/contacts/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -663,6 +676,23 @@ export default function App() {
       });
       const data = await res.json();
       if (data.contacts) setContacts(data.contacts);
+      setNewContactName('');
+      setNewContactPhone('+91 ');
+      setShowAddContact(false);
+    } catch {
+      if (customContacts.length > 0) {
+        setContacts((prev) => [
+          {
+            id: 'contact-' + Date.now(),
+            name: customContacts[0].name,
+            phone: customContacts[0].phone,
+            username: '@' + customContacts[0].name.toLowerCase().replace(/[^a-z0-9]/g, '_'),
+            online: true,
+            lastSeen: 'Online'
+          },
+          ...prev
+        ]);
+      }
       setNewContactName('');
       setNewContactPhone('+91 ');
       setShowAddContact(false);
@@ -680,6 +710,11 @@ export default function App() {
       .filter(Boolean);
 
     const hostDisplayName = currentUser.telechatsDisplayName || currentUser.name;
+
+    // Create native Telegram Supergroup + Voice Chat via TDLib in parallel
+    tdlibClientEngine
+      .createTdlibVoiceRoom(newRoomTitle.trim(), `${newRoomTopic}\n${rules.join('\n')}`)
+      .catch(() => {});
 
     try {
       const res = await apiFetch('/api/rooms', {

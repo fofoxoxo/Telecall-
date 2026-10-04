@@ -1,4 +1,5 @@
 import { TELEGRAM_CONFIG } from '../config/telegramConfig';
+import { tdlibClientEngine } from './tdlibClient';
 
 export type AuthDeliveryMethod = 'telegram_app' | 'sms' | 'phone_call' | 'email';
 
@@ -245,46 +246,11 @@ export class ClientMTProtoEngine {
     deliveryMethod?: AuthDeliveryMethod;
     error?: string;
   }> {
-    const method: AuthDeliveryMethod =
-      options?.deliveryMethod || (options?.isNewUser ? 'sms' : 'telegram_app');
-    const creds = getSavedTelegramCredentials();
-    try {
-      const res = await apiFetch('/api/auth/send-code', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          phone: phone.trim(),
-          email: options?.email?.trim(),
-          deliveryMethod: method,
-          forceResend: options?.forceResend,
-          isNewUser: options?.isNewUser,
-          apiId: creds.apiId,
-          apiHash: creds.apiHash,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        return {
-          ok: false,
-          error: data.error || 'Could not send OTP from Telegram Data Center.',
-        };
-      }
-      return {
-        ok: true,
-        phoneCodeHash: data.phoneCodeHash,
-        deliveryType: data.deliveryType,
-        deliveryMethod: method,
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        error: `Cannot reach backend server (${getApiBaseUrl() || 'local'}). Make sure your backend server is running and connected.`,
-      };
-    }
+    return tdlibClientEngine.sendCode(phone, options);
   }
 
   /**
-   * Step 2 of Telegram Login / Registration: `auth.signIn`, `auth.checkPassword` (2FA), or `auth.signUp`
+   * Step 2 of Telegram Login / Registration: TDLib `checkAuthenticationCode`, `checkAuthenticationPassword` (2FA), or `registerUser`
    */
   public async verifyAuthCode(params: {
     phone: string;
@@ -303,59 +269,11 @@ export class ClientMTProtoEngine {
     sessionData?: MTProtoSessionData;
     error?: string;
   }> {
-    const creds = getSavedTelegramCredentials();
-    try {
-      const res = await apiFetch('/api/auth/verify-code', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          phone: params.phone.trim(),
-          code: params.code.trim(),
-          phoneCodeHash: params.phoneCodeHash,
-          name: params.name.trim(),
-          lastName: params.lastName?.trim(),
-          bio: params.bio?.trim(),
-          email: params.email?.trim(),
-          twoFactorPassword: params.twoFactorPassword,
-          require2FA: params.require2FA,
-          apiId: creds.apiId,
-        }),
-      });
-      const data = await res.json();
-      if (data.requires2FA) {
-        return {
-          ok: false,
-          requires2FA: true,
-          passwordHint: data.passwordHint || 'Telegram Cloud Password',
-          error: data.error,
-        };
-      }
-      if (!res.ok || !data.ok) {
-        return { ok: false, error: data.error || 'Invalid Telegram verification code.' };
-      }
-
-      const sessionData: MTProtoSessionData = {
-        dcId: TELEGRAM_CONFIG.DEFAULT_DC_ID,
-        authKeyHex: data.authKeyHex || btoa(params.phone + ':' + Date.now()),
-        serverSalt: data.serverSalt || '7f3a9c1e5b2d8f4a',
-        userId: data.user.id,
-        phone: data.user.phone,
-        name: data.user.name,
-        username: data.user.username,
-        bio: data.user.bio || 'Synced with Official Telegram Account',
-        email: data.user.email,
-        twoFactorEnabled: Boolean(data.user.twoFactorEnabled),
-        createdAt: Date.now(),
-      };
-
-      this.session.save(sessionData);
-      return { ok: true, sessionData };
-    } catch (err) {
-      return {
-        ok: false,
-        error: `Backend connection failed: ${(err as Error).message}`,
-      };
+    const result = await tdlibClientEngine.verifyCodeOrPassword(params);
+    if (result.ok && result.sessionData) {
+      this.session.save(result.sessionData);
     }
+    return result;
   }
 
   public updateSavedProfile(updates: Partial<MTProtoSessionData>): MTProtoSessionData | null {
