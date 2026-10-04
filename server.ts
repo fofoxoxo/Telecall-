@@ -4,7 +4,11 @@ import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
 import path from 'path';
 import crypto from 'crypto';
-import { createDcMediaBridgeRouter } from './src/backend/index';
+import {
+  createDcMediaBridgeRouter,
+  createLocalSyncRouter,
+  offlineQueueManager,
+} from './src/backend/index';
 
 export interface VoiceParticipant {
   id: string;
@@ -274,6 +278,7 @@ async function startServer() {
   const PORT = 3000;
   app.use(express.json({ limit: '25mb' }));
   app.use('/api/dc-media', createDcMediaBridgeRouter());
+  app.use('/api/local-sync', createLocalSyncRouter());
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
@@ -535,6 +540,16 @@ async function startServer() {
     };
 
     voiceRooms.set(roomId, newRoom);
+    offlineQueueManager
+      .enqueueAction('CREATE_VOICE_ROOM', {
+        roomId: newRoom.id,
+        title: newRoom.title,
+        topicPath: `/voice/${String(topic).toLowerCase().replace(/[^a-z0-9]+/g, '-')}/${roomId}`,
+        visibility: newRoom.visibility,
+        rules: newRoom.rules,
+        hostName: newRoom.hostName,
+      })
+      .catch(() => {});
     broadcast('room:created', newRoom);
     res.json({ ok: true, room: newRoom });
   });

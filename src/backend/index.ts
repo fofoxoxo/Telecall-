@@ -8,6 +8,18 @@ export { multiDcRouter, MultiDcRouter } from './dcRouter';
 export { streamingMediaHandler, StreamingMediaHandler } from './mediaHandler';
 export { localMediaCache, LocalMediaCache } from './localCache';
 export type { CachedMediaRecord } from './localCache';
+export { localSqliteDb, LocalSqliteDatabase } from './localDatabase';
+export type {
+  LocalDialogRecord,
+  LocalMessageRecord,
+  LocalUserProfileRecord,
+  LocalTopicPathRecord,
+  PtsSyncStateRecord,
+  OfflineQueueItem,
+} from './localDatabase';
+export { ptsDiffSyncService, PtsDiffSyncService } from './ptsSyncService';
+export { offlineQueueManager, OfflineQueueManager } from './offlineQueue';
+export { createLocalSyncRouter } from './localReaderRouter';
 
 /**
  * Step 2.4: Clean Modular Express Bridge Router (`/api/dc-media/*`)
