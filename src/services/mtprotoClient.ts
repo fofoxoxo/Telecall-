@@ -19,6 +19,7 @@ export interface MTProtoSessionData {
   telechatsHandle?: string;
   telechatsStatus?: string;
   telechatsCategoryTag?: string;
+  avatarDataUrl?: string;
   createdAt: number;
 }
 
@@ -243,6 +244,8 @@ export class ClientMTProtoEngine {
     ok: boolean;
     phoneCodeHash?: string;
     deliveryType?: string;
+    nextType?: string;
+    timeoutSeconds?: number;
     deliveryMethod?: AuthDeliveryMethod;
     error?: string;
   }> {
@@ -250,7 +253,7 @@ export class ClientMTProtoEngine {
   }
 
   /**
-   * Step 2 of Telegram Login / Registration: TDLib `checkAuthenticationCode`, `checkAuthenticationPassword` (2FA), or `registerUser`
+   * Step 2 of Telegram Login: `TL_auth_signIn`, `SESSION_PASSWORD_NEEDED` (2FA), or `PHONE_NUMBER_UNOCCUPIED` (`requiresSignUp`)
    */
   public async verifyAuthCode(params: {
     phone: string;
@@ -265,11 +268,34 @@ export class ClientMTProtoEngine {
   }): Promise<{
     ok: boolean;
     requires2FA?: boolean;
+    requiresSignUp?: boolean;
     passwordHint?: string;
     sessionData?: MTProtoSessionData;
     error?: string;
   }> {
     const result = await tdlibClientEngine.verifyCodeOrPassword(params);
+    if (result.ok && result.sessionData) {
+      this.session.save(result.sessionData);
+    }
+    return result;
+  }
+
+  /**
+   * Step 3 (Only when `PHONE_NUMBER_UNOCCUPIED` is returned by Telegram):
+   * Collects user's First Name, Last Name, and optional Profile Picture and calls `TL_auth_signUp`.
+   */
+  public async completeSignUp(params: {
+    phone: string;
+    phoneCodeHash: string;
+    firstName: string;
+    lastName?: string;
+    avatarDataUrl?: string;
+  }): Promise<{
+    ok: boolean;
+    sessionData?: MTProtoSessionData;
+    error?: string;
+  }> {
+    const result = await tdlibClientEngine.completeNewUserSignUp(params);
     if (result.ok && result.sessionData) {
       this.session.save(result.sessionData);
     }

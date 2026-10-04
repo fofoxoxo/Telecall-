@@ -44,6 +44,10 @@ import {
 } from './services/mtprotoClient';
 import { tdlibClientEngine } from './services/tdlibClient';
 import {
+  NotificationCenter,
+  NotificationEvents
+} from './services/tgnetConnectionsManager';
+import {
   SettingsDrawer,
   AppThemeId,
   THEME_PALETTES
@@ -110,11 +114,11 @@ interface ActiveCallState {
 // 6 Categories for the 3-Column Category Tag Grid on Voice Rooms Tab
 const CATEGORY_GRID_TAGS = [
   'All',
+  'Telegram Supergroups',
+  'Telegram Channels',
   'Education & Exams',
   'Technology & Startups',
-  'Music & Poetry',
-  'Business & Finance',
-  'Language Practice'
+  'Music & Poetry'
 ];
 
 const DIAL_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '0', '#'];
@@ -142,21 +146,25 @@ export default function App() {
     mtprotoEngine.getSavedSession()
   );
 
-  // Telegram Auth Flow States (Primary Telegram Account via MTProto + Custom TeleChats Profile Layer)
+  // Official Telegram Auth Flow States:
+  // Step 1: 'phone' (Enter Phone Number -> TLRPC.TL_auth_sendCode)
+  // Step 2: 'otp' (Enter 5-digit Code -> TLRPC.TL_auth_signIn)
+  // Step 3a: '2fa' (If SESSION_PASSWORD_NEEDED -> account.getPassword + auth.checkPassword)
+  // Step 3b: 'signup' (If PHONE_NUMBER_UNOCCUPIED -> Enter First Name, Last Name & Profile Pic -> TLRPC.TL_auth_signUp)
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
-  const [authMode, setAuthMode] = useState<'existing_user' | 'new_user'>('existing_user');
-  const [authStep, setAuthStep] = useState<'phone' | 'otp' | '2fa'>('phone');
-  const [deliveryMethod, setDeliveryMethod] = useState<AuthDeliveryMethod>('telegram_app');
+  const [authStep, setAuthStep] = useState<'phone' | 'otp' | '2fa' | 'signup'>('phone');
   const [phoneInput, setPhoneInput] = useState('+91 ');
-  const [emailInput, setEmailInput] = useState('');
   const [firstNameInput, setFirstNameInput] = useState('');
   const [lastNameInput, setLastNameInput] = useState('');
+  const [signupAvatarDataUrl, setSignupAvatarDataUrl] = useState<string>('');
   const [otpInput, setOtpInput] = useState('');
-  const [twoFactorEnabledToggle, setTwoFactorEnabledToggle] = useState(false);
+  const [sentDeliveryType, setSentDeliveryType] = useState<string>('auth.sentCodeTypeApp');
   const [twoFactorPassword, setTwoFactorPassword] = useState('');
+  const [passwordHint, setPasswordHint] = useState('');
   const [phoneCodeHash, setPhoneCodeHash] = useState('');
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
+  const [syncingCache4Db, setSyncingCache4Db] = useState(false);
 
   // Custom TeleChats Profile Layer Edit States (on top of synced primary Telegram profile)
   const [isEditingTelechatsLayer, setIsEditingTelechatsLayer] = useState(false);
@@ -390,6 +398,77 @@ export default function App() {
 
   useEffect(() => {
     mtprotoEngine.initPersistentConnection();
+    tdlibClientEngine.ensureReadyForAuth().catch(() => {});
+
+    // Hydrate from local cache4.db immediately (0ms offline launch)
+    const cached = tdlibClientEngine.getCachedSnapshot();
+    if (Array.isArray(cached.contacts) && cached.contacts.length > 0) {
+      setContacts(cached.contacts);
+    }
+    if (Array.isArray(cached.voiceRooms) && cached.voiceRooms.length > 0) {
+      setRooms((prev) => {
+        const merged = [...cached.voiceRooms, ...prev];
+        return merged.filter(
+          (v, idx, arr) => arr.findIndex((item) => item.id === v.id) === idx
+        );
+      });
+    }
+    if (Array.isArray(cached.callLogs) && cached.callLogs.length > 0) {
+      setCallLogs((prev) => {
+        const merged = [...cached.callLogs, ...prev];
+        return merged.filter(
+          (v, idx, arr) => arr.findIndex((item) => item.id === v.id) === idx
+        );
+      });
+    }
+
+    // If user is already logged in with a real Telegram session, sync fresh data in background
+    if (session) {
+      setSyncingCache4Db(true);
+      tdlibClientEngine
+        .syncAllTelegramData()
+        .catch(() => {})
+        .finally(() => setSyncingCache4Db(false));
+    }
+
+    // Plus Messenger / Official Telegram NotificationCenter observers for real-time updates
+    const unsubContacts = NotificationCenter.getInstance().addObserver(
+      NotificationEvents.contactsDidLoad,
+      (loadedContacts) => {
+        if (Array.isArray(loadedContacts) && loadedContacts.length > 0) {
+          setContacts(loadedContacts);
+        }
+      }
+    );
+
+    const unsubVoiceRooms = NotificationCenter.getInstance().addObserver(
+      NotificationEvents.voiceRoomsDidUpdate,
+      (syncedRooms) => {
+        if (Array.isArray(syncedRooms) && syncedRooms.length > 0) {
+          setRooms((prev) => {
+            const merged = [...syncedRooms, ...prev];
+            localStorage.setItem('telecall_rooms_cache', JSON.stringify(merged));
+            return merged.filter(
+              (v, idx, arr) => arr.findIndex((item) => item.id === v.id) === idx
+            );
+          });
+        }
+      }
+    );
+
+    const unsubCallHistory = NotificationCenter.getInstance().addObserver(
+      NotificationEvents.callHistoryDidLoad,
+      (syncedCalls) => {
+        if (Array.isArray(syncedCalls) && syncedCalls.length > 0) {
+          setCallLogs((prev) => {
+            const merged = [...syncedCalls, ...prev];
+            return merged.filter(
+              (v, idx, arr) => arr.findIndex((item) => item.id === v.id) === idx
+            );
+          });
+        }
+      }
+    );
 
     const unsubEvents = mtprotoEngine.onServerEvent((event, payload) => {
       if (event === 'init') {
@@ -442,6 +521,9 @@ export default function App() {
     }
 
     return () => {
+      unsubContacts();
+      unsubVoiceRooms();
+      unsubCallHistory();
       unsubEvents();
     };
   }, [currentUser.userId, currentUser.name, currentUser.phone, currentUser.telechatsDisplayName]);
@@ -536,37 +618,28 @@ export default function App() {
     }
   };
 
-  // --- TELEGRAM MTPROTO LOGIN & CUSTOM TELECHATS PROFILE HANDLERS ---
+  // --- OFFICIAL TELEGRAM MTPROTO LOGIN, 2FA & PHONE_NUMBER_UNOCCUPIED SIGNUP HANDLERS ---
 
-  const openAuthModal = (mode: 'existing_user' | 'new_user' = 'existing_user') => {
-    setAuthMode(mode);
+  const openAuthModal = () => {
     setAuthStep('phone');
-    setDeliveryMethod(mode === 'existing_user' ? 'telegram_app' : 'sms');
     setAuthError('');
+    setOtpInput('');
+    setTwoFactorPassword('');
     setShowAuthModal(true);
   };
 
-  const handleSendOtp = async (e: React.FormEvent, customMethod?: AuthDeliveryMethod) => {
+  const handleSendOtp = async (e: React.FormEvent, forceResend = false) => {
     e.preventDefault();
     setAuthError('');
-    const chosenMethod = customMethod || deliveryMethod;
-
-    if (chosenMethod === 'email' && !emailInput.trim()) {
-      setAuthError('Please enter your email address to receive the Telegram Email OTP.');
-      return;
-    }
-
     setAuthLoading(true);
     const res = await mtprotoEngine.sendAuthCode(phoneInput, {
-      deliveryMethod: chosenMethod,
-      email: emailInput,
-      isNewUser: authMode === 'new_user'
+      forceResend
     });
     setAuthLoading(false);
 
     if (res.ok && res.phoneCodeHash) {
       setPhoneCodeHash(res.phoneCodeHash);
-      setDeliveryMethod(chosenMethod);
+      setSentDeliveryType(res.deliveryType || 'auth.sentCodeTypeApp');
       setOtpInput('');
       setAuthStep('otp');
     } else {
@@ -574,57 +647,103 @@ export default function App() {
     }
   };
 
+  const finalizeLoggedInSession = (sessionData: MTProtoSessionData) => {
+    const enriched: MTProtoSessionData = {
+      ...sessionData,
+      telechatsDisplayName:
+        sessionData.telechatsDisplayName || `${sessionData.name} (TeleChats)`,
+      telechatsHandle:
+        sessionData.telechatsHandle ||
+        `${sessionData.username.replace(/_tg$/, '')}.telechats`,
+      telechatsStatus:
+        sessionData.telechatsStatus || 'Synced with Primary Telegram Account',
+      telechatsCategoryTag:
+        sessionData.telechatsCategoryTag || 'Telegram Supergroups'
+    };
+    mtprotoEngine.updateSavedProfile(enriched);
+    setSession(enriched);
+    setShowAuthModal(false);
+    setAuthStep('phone');
+    setTwoFactorPassword('');
+
+    // Trigger full background sync of Contacts, Dialogs, Supergroups, Channels & Call History into cache4.db
+    setSyncingCache4Db(true);
+    tdlibClientEngine
+      .syncAllTelegramData()
+      .catch(() => {})
+      .finally(() => setSyncingCache4Db(false));
+  };
+
   const handleVerifyOtpOr2FA = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
-
-    if (authStep === 'otp' && authMode === 'existing_user' && twoFactorEnabledToggle) {
-      setAuthStep('2fa');
-      return;
-    }
-
     setAuthLoading(true);
+
     const res = await mtprotoEngine.verifyAuthCode({
       phone: phoneInput,
       code: otpInput,
       phoneCodeHash,
-      name:
-        authMode === 'new_user'
-          ? firstNameInput || 'TeleCall User'
-          : firstNameInput || currentUser.name,
+      name: firstNameInput || currentUser.name,
       lastName: lastNameInput,
-      email: emailInput || undefined,
-      twoFactorPassword: twoFactorPassword || undefined,
-      require2FA: twoFactorEnabledToggle
+      twoFactorPassword: twoFactorPassword || undefined
     });
     setAuthLoading(false);
 
+    // 1. If Telegram returned SESSION_PASSWORD_NEEDED -> prompt for 2FA Cloud Password
     if (res.requires2FA) {
+      setPasswordHint(res.passwordHint || 'Telegram Cloud Password');
       setAuthStep('2fa');
       return;
     }
 
+    // 2. If Telegram returned PHONE_NUMBER_UNOCCUPIED -> prompt for Name & Profile Photo (TL_auth_signUp)
+    if (res.requiresSignUp) {
+      setAuthStep('signup');
+      return;
+    }
+
     if (res.ok && res.sessionData) {
-      const enriched: MTProtoSessionData = {
-        ...res.sessionData,
-        telechatsDisplayName:
-          res.sessionData.telechatsDisplayName || `${res.sessionData.name} (TeleChats)`,
-        telechatsHandle:
-          res.sessionData.telechatsHandle ||
-          `${res.sessionData.username.replace(/_tg$/, '')}.telechats`,
-        telechatsStatus:
-          res.sessionData.telechatsStatus || 'Active on TeleChats Voice Rooms',
-        telechatsCategoryTag:
-          res.sessionData.telechatsCategoryTag || 'Education & Exams'
-      };
-      mtprotoEngine.updateSavedProfile(enriched);
-      setSession(enriched);
-      setShowAuthModal(false);
-      setAuthStep('phone');
-      setTwoFactorPassword('');
+      finalizeLoggedInSession(res.sessionData);
     } else {
       setAuthError(res.error || 'Verification failed.');
     }
+  };
+
+  const handleCompleteSignUp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    if (!firstNameInput.trim()) {
+      setAuthError('Please enter your First Name to create your Telegram account.');
+      return;
+    }
+
+    setAuthLoading(true);
+    const res = await mtprotoEngine.completeSignUp({
+      phone: phoneInput,
+      phoneCodeHash,
+      firstName: firstNameInput.trim(),
+      lastName: lastNameInput.trim(),
+      avatarDataUrl: signupAvatarDataUrl || undefined
+    });
+    setAuthLoading(false);
+
+    if (res.ok && res.sessionData) {
+      finalizeLoggedInSession(res.sessionData);
+    } else {
+      setAuthError(res.error || 'Could not complete Telegram registration.');
+    }
+  };
+
+  const handleAvatarFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setSignupAvatarDataUrl(reader.result);
+      }
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleSaveTelechatsLayer = (e: React.FormEvent) => {
@@ -657,15 +776,20 @@ export default function App() {
         ? [{ name: newContactName.trim(), phone: newContactPhone.trim() }]
         : [];
     try {
-      // 1. Try syncing real contacts directly from local TDLib SQLite/IndexedDB engine
-      const tdContacts = await tdlibClientEngine.getTdlibContacts();
+      // 1. Sync real contacts & match phonebook numbers via ContactsController (`contacts.importContacts` + `contacts.getContacts`)
+      const phoneBookEntries = customContacts.map((c) => {
+        const parts = c.name.split(' ');
+        return {
+          firstName: parts[0] || c.name,
+          lastName: parts.slice(1).join(' '),
+          phone: c.phone
+        };
+      });
+      const tdContacts = await tdlibClientEngine.getTdlibContacts(
+        phoneBookEntries.length > 0 ? phoneBookEntries : undefined
+      );
       if (tdContacts && tdContacts.length > 0) {
-        setContacts((prev) => {
-          const merged = [...tdContacts, ...prev];
-          return merged.filter(
-            (v, idx, arr) => arr.findIndex((item) => item.phone === v.phone) === idx
-          );
-        });
+        setContacts(tdContacts);
       }
 
       // 2. Also sync with backend directory
@@ -1007,9 +1131,7 @@ export default function App() {
 
         <div className="flex items-center gap-2">
           <button
-            onClick={() =>
-              session ? setActiveBottomTab('profile') : openAuthModal('existing_user')
-            }
+            onClick={() => (session ? setActiveBottomTab('profile') : openAuthModal())}
             className={`min-h-[38px] px-3 py-1.5 rounded-xl border ${palette.border} text-xs font-medium flex items-center gap-1.5`}
           >
             <User className={`w-3.5 h-3.5 ${palette.accentText}`} />
@@ -1730,18 +1852,34 @@ export default function App() {
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
                     <button
-                      onClick={() => openAuthModal('existing_user')}
+                      onClick={() => openAuthModal()}
                       className="min-h-[40px] px-3.5 py-2 rounded-xl bg-sky-500 text-slate-950 font-semibold text-xs flex items-center justify-center gap-1.5"
                     >
                       <User className="w-4 h-4" />
-                      <span>Login Existing Telegram User</span>
+                      <span>
+                        {session ? 'Switch / Re-Login Telegram' : 'Continue with Telegram'}
+                      </span>
                     </button>
                     <button
-                      onClick={() => openAuthModal('new_user')}
+                      onClick={() => {
+                        setSyncingCache4Db(true);
+                        tdlibClientEngine
+                          .syncAllTelegramData()
+                          .catch(() => {})
+                          .finally(() => setSyncingCache4Db(false));
+                      }}
                       className={`min-h-[40px] px-3.5 py-2 rounded-xl border ${palette.border} font-semibold text-xs flex items-center justify-center gap-1.5`}
                     >
-                      <UserPlus className={`w-4 h-4 ${palette.accentText}`} />
-                      <span>New User Sign Up (Call/SMS/Email)</span>
+                      <RefreshCw
+                        className={`w-4 h-4 ${palette.accentText} ${
+                          syncingCache4Db ? 'animate-spin' : ''
+                        }`}
+                      />
+                      <span>
+                        {syncingCache4Db
+                          ? 'Syncing cache4.db...'
+                          : 'Sync Chats, Contacts & Calls'}
+                      </span>
                     </button>
                   </div>
                 </div>
@@ -2153,321 +2291,225 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL: Telegram Login (OTP + 2FA) & New User Registration (SMS / Phone Call / Email OTP) */}
+      {/* MODAL: Official Telegram Login (`TL_auth_sendCode` -> `TL_auth_signIn` -> `PHONE_NUMBER_UNOCCUPIED` `TL_auth_signUp` or `2FA`) */}
       {showAuthModal && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <form
-            onSubmit={authStep === 'phone' ? handleSendOtp : handleVerifyOtpOr2FA}
-            className={`${palette.bgCard} border ${palette.border} rounded-2xl max-w-md w-full p-5 space-y-4`}
+            onSubmit={
+              authStep === 'phone'
+                ? (e) => handleSendOtp(e, false)
+                : authStep === 'signup'
+                ? handleCompleteSignUp
+                : handleVerifyOtpOr2FA
+            }
+            className={`${palette.bgCard} border ${palette.border} rounded-2xl max-w-sm w-full p-6 space-y-5`}
           >
-            <div className="flex items-center justify-between">
-              <h3 className="text-base font-bold">
-                {authMode === 'existing_user'
-                  ? 'Telegram Account Login'
-                  : 'New Telegram User Sign Up'}
-              </h3>
-              <span className={`text-[11px] ${palette.accentText} font-medium`}>
-                TeleCall MTProto
-              </span>
-            </div>
-
-            <div className={`grid grid-cols-2 gap-1.5 p-1 rounded-xl ${palette.bgMain} border ${palette.border}`}>
-              <button
-                type="button"
-                onClick={() => {
-                  setAuthMode('existing_user');
-                  setAuthStep('phone');
-                  setDeliveryMethod('telegram_app');
-                  setAuthError('');
-                }}
-                className={`min-h-[36px] rounded-lg text-xs font-semibold transition-colors ${
-                  authMode === 'existing_user'
-                    ? 'bg-sky-500 text-slate-950'
-                    : palette.textSecondary
-                }`}
-              >
-                Existing Telegram User
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setAuthMode('new_user');
-                  setAuthStep('phone');
-                  setDeliveryMethod('sms');
-                  setAuthError('');
-                }}
-                className={`min-h-[36px] rounded-lg text-xs font-semibold transition-colors ${
-                  authMode === 'new_user'
-                    ? 'bg-sky-500 text-slate-950'
-                    : palette.textSecondary
-                }`}
-              >
-                New User Sign Up
-              </button>
-            </div>
-
+            {/* Step 1: Enter Phone Number (Exactly like Official Telegram App) */}
             {authStep === 'phone' && (
-              <div className="space-y-3">
-                {authMode === 'new_user' && (
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className={`block text-xs ${palette.textSecondary} mb-1`}>
-                        First Name
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="First name"
-                        value={firstNameInput}
-                        onChange={(e) => setFirstNameInput(e.target.value)}
-                        className={`w-full h-10 px-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs`}
-                      />
-                    </div>
-                    <div>
-                      <label className={`block text-xs ${palette.textSecondary} mb-1`}>
-                        Last Name (Optional)
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="Last name"
-                        value={lastNameInput}
-                        onChange={(e) => setLastNameInput(e.target.value)}
-                        className={`w-full h-10 px-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs`}
-                      />
-                    </div>
-                  </div>
-                )}
-
+              <div className="space-y-4 text-center">
+                <div className="w-14 h-14 rounded-full bg-sky-500/15 text-sky-400 flex items-center justify-center mx-auto">
+                  <Phone className="w-6 h-6" />
+                </div>
                 <div>
+                  <h3 className="text-lg font-bold">Your Phone Number</h3>
+                  <p className={`text-xs ${palette.textSecondary} mt-1`}>
+                    Please confirm your country code and enter your Telegram phone number.
+                  </p>
+                </div>
+
+                <div className="text-left">
                   <label className={`block text-xs ${palette.textSecondary} mb-1`}>
-                    Telegram Phone Number
+                    Phone Number
                   </label>
                   <input
                     type="tel"
                     required
+                    autoFocus
+                    placeholder="+91 98765 43210"
                     value={phoneInput}
                     onChange={(e) => setPhoneInput(e.target.value)}
-                    className={`w-full h-10 px-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs font-mono`}
+                    className={`w-full h-12 px-3.5 rounded-xl ${palette.bgMain} border ${palette.border} text-base font-mono focus:outline-none focus:border-sky-500`}
                   />
                 </div>
-
-                <div>
-                  <label className={`block text-xs ${palette.textSecondary} mb-1.5`}>
-                    Receive Verification Code Via
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {authMode === 'existing_user' && (
-                      <button
-                        type="button"
-                        onClick={() => setDeliveryMethod('telegram_app')}
-                        className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 ${
-                          deliveryMethod === 'telegram_app'
-                            ? 'bg-sky-500/20 border-sky-500 text-sky-400'
-                            : `${palette.bgMain} ${palette.border}`
-                        }`}
-                      >
-                        <MessageSquare className="w-3.5 h-3.5" />
-                        <span>Telegram App OTP</span>
-                      </button>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={() => setDeliveryMethod('sms')}
-                      className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 ${
-                        deliveryMethod === 'sms'
-                          ? 'bg-sky-500/20 border-sky-500 text-sky-400'
-                          : `${palette.bgMain} ${palette.border}`
-                      }`}
-                    >
-                      <MessageSquare className="w-3.5 h-3.5" />
-                      <span>SMS OTP</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setDeliveryMethod('phone_call')}
-                      className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 ${
-                        deliveryMethod === 'phone_call'
-                          ? 'bg-sky-500/20 border-sky-500 text-sky-400'
-                          : `${palette.bgMain} ${palette.border}`
-                      }`}
-                    >
-                      <PhoneCall className="w-3.5 h-3.5" />
-                      <span>Phone Call OTP</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setDeliveryMethod('email')}
-                      className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 ${
-                        deliveryMethod === 'email'
-                          ? 'bg-sky-500/20 border-sky-500 text-sky-400'
-                          : `${palette.bgMain} ${palette.border}`
-                      }`}
-                    >
-                      <Mail className="w-3.5 h-3.5" />
-                      <span>Email OTP</span>
-                    </button>
-                  </div>
-                </div>
-
-                {deliveryMethod === 'email' && (
-                  <div>
-                    <label className="block text-xs text-sky-400 mb-1">
-                      Email Address for Telegram OTP
-                    </label>
-                    <input
-                      type="email"
-                      required
-                      placeholder="you@example.com"
-                      value={emailInput}
-                      onChange={(e) => setEmailInput(e.target.value)}
-                      className={`w-full h-10 px-3 rounded-xl ${palette.bgMain} border border-sky-500/60 text-xs`}
-                    />
-                  </div>
-                )}
-
-                {authMode === 'existing_user' && (
-                  <label className={`flex items-center justify-between p-2.5 rounded-xl ${palette.bgMain} border ${palette.border} cursor-pointer`}>
-                    <div className="flex items-center gap-2">
-                      <ShieldCheck className="w-4 h-4 text-sky-400" />
-                      <span className="text-xs">
-                        My account has 2-Step Verification (2FA Password)
-                      </span>
-                    </div>
-                    <input
-                      type="checkbox"
-                      checked={twoFactorEnabledToggle}
-                      onChange={(e) => setTwoFactorEnabledToggle(e.target.checked)}
-                      className="accent-sky-500 w-4 h-4"
-                    />
-                  </label>
-                )}
               </div>
             )}
 
+            {/* Step 2: Enter Verification Code (`TLRPC.TL_auth_signIn`) */}
             {authStep === 'otp' && (
-              <div className="space-y-3">
-                <div className={`p-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs`}>
-                  {deliveryMethod === 'telegram_app' &&
-                    `Code sent to your Telegram app on ${phoneInput}.`}
-                  {deliveryMethod === 'sms' && `SMS OTP sent to ${phoneInput}.`}
-                  {deliveryMethod === 'phone_call' &&
-                    `Calling ${phoneInput} with your 5-digit Telegram voice code...`}
-                  {deliveryMethod === 'email' &&
-                    `Email OTP sent to ${emailInput || 'your email'}.`}
+              <div className="space-y-4 text-center">
+                <div className="w-14 h-14 rounded-full bg-sky-500/15 text-sky-400 flex items-center justify-center mx-auto">
+                  <MessageSquare className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold">{phoneInput}</h3>
+                  <p className={`text-xs ${palette.textSecondary} mt-1`}>
+                    {sentDeliveryType.toLowerCase().includes('sms')
+                      ? 'We have sent you an SMS with the activation code.'
+                      : 'We have sent the code to the Telegram app on your other device.'}
+                  </p>
                 </div>
 
-                <div>
+                <div className="text-left">
                   <label className="block text-xs text-sky-400 mb-1">
-                    Enter 5-Digit Verification Code
+                    5-Digit Telegram Code
                   </label>
                   <input
                     type="text"
                     required
+                    autoFocus
+                    maxLength={6}
+                    placeholder="• • • • •"
                     value={otpInput}
                     onChange={(e) => setOtpInput(e.target.value)}
-                    className={`w-full h-11 px-3 rounded-xl ${palette.bgMain} border border-sky-500 text-sm font-mono tracking-widest`}
+                    className={`w-full h-12 px-3.5 rounded-xl ${palette.bgMain} border border-sky-500 text-center text-lg font-mono tracking-widest focus:outline-none`}
                   />
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={(e) => handleSendOtp(e, 'sms')}
-                    className="text-[11px] text-sky-400 hover:underline"
-                  >
-                    Get Code via SMS
-                  </button>
-                  <span>·</span>
-                  <button
-                    type="button"
-                    onClick={(e) => handleSendOtp(e, 'phone_call')}
-                    className="text-[11px] text-sky-400 hover:underline"
-                  >
-                    Request Phone Call
-                  </button>
-                  <span>·</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setDeliveryMethod('email');
-                      setAuthStep('phone');
-                    }}
-                    className="text-[11px] text-sky-400 hover:underline"
-                  >
-                    Get Code via Email
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={(e) => handleSendOtp(e, true)}
+                  className="text-xs text-sky-400 hover:underline"
+                >
+                  Didn&apos;t get the code? Resend Code
+                </button>
               </div>
             )}
 
+            {/* Step 3a: Two-Step Verification (`SESSION_PASSWORD_NEEDED` -> `auth.checkPassword`) */}
             {authStep === '2fa' && (
-              <div className="space-y-3">
-                <div className={`p-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs flex items-center gap-2`}>
-                  <ShieldCheck className="w-4 h-4 text-sky-400 shrink-0" />
-                  <span>
-                    Two-Step Verification is enabled on this Telegram account. Enter your Cloud
-                    Password to finish signing in.
-                  </span>
+              <div className="space-y-4 text-center">
+                <div className="w-14 h-14 rounded-full bg-sky-500/15 text-sky-400 flex items-center justify-center mx-auto">
+                  <Lock className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold">Your Cloud Password</h3>
+                  <p className={`text-xs ${palette.textSecondary} mt-1`}>
+                    You have Two-Step Verification enabled. Enter your Telegram Cloud Password.
+                  </p>
                 </div>
 
-                <div>
+                <div className="text-left">
                   <label className="block text-xs text-sky-400 mb-1">
-                    Telegram 2FA Cloud Password
+                    Password {passwordHint ? `(Hint: ${passwordHint})` : ''}
                   </label>
                   <input
                     type="password"
                     required
-                    placeholder="Enter your 2FA password..."
+                    autoFocus
+                    placeholder="Enter your Cloud Password"
                     value={twoFactorPassword}
                     onChange={(e) => setTwoFactorPassword(e.target.value)}
-                    className={`w-full h-11 px-3 rounded-xl ${palette.bgMain} border border-sky-500 text-xs`}
+                    className={`w-full h-12 px-3.5 rounded-xl ${palette.bgMain} border border-sky-500 text-sm focus:outline-none`}
                   />
                 </div>
               </div>
             )}
 
-            {authError && <p className="text-xs text-rose-400">{authError}</p>}
+            {/* Step 3b: Automatic New Account Registration (`PHONE_NUMBER_UNOCCUPIED` -> `TLRPC.TL_auth_signUp`) */}
+            {authStep === 'signup' && (
+              <div className="space-y-4 text-center">
+                <div className="flex flex-col items-center gap-2">
+                  <label className="relative w-20 h-20 rounded-full bg-sky-500/15 border-2 border-dashed border-sky-400/60 flex items-center justify-center cursor-pointer overflow-hidden">
+                    {signupAvatarDataUrl ? (
+                      <img
+                        src={signupAvatarDataUrl}
+                        alt="Profile preview"
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <span className="text-[11px] font-semibold text-sky-400 px-2">
+                        Add Photo
+                      </span>
+                    )}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleAvatarFileSelect}
+                      className="hidden"
+                    />
+                  </label>
+                  <div>
+                    <h3 className="text-lg font-bold">Your Info</h3>
+                    <p className={`text-xs ${palette.textSecondary} mt-0.5`}>
+                      Enter your name and add a profile picture to create your Telegram account.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-2.5 text-left">
+                  <div>
+                    <label className={`block text-xs ${palette.textSecondary} mb-1`}>
+                      First Name (Required)
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      autoFocus
+                      placeholder="First name"
+                      value={firstNameInput}
+                      onChange={(e) => setFirstNameInput(e.target.value)}
+                      className={`w-full h-11 px-3.5 rounded-xl ${palette.bgMain} border ${palette.border} text-sm`}
+                    />
+                  </div>
+                  <div>
+                    <label className={`block text-xs ${palette.textSecondary} mb-1`}>
+                      Last Name (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Last name"
+                      value={lastNameInput}
+                      onChange={(e) => setLastNameInput(e.target.value)}
+                      className={`w-full h-11 px-3.5 rounded-xl ${palette.bgMain} border ${palette.border} text-sm`}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {authError && (
+              <p className="text-xs text-rose-400 text-center bg-rose-500/10 border border-rose-500/30 rounded-xl p-2.5">
+                {authError}
+              </p>
+            )}
 
             <div className="flex justify-between items-center gap-2 pt-1">
               {authStep !== 'phone' ? (
                 <button
                   type="button"
-                  onClick={() => setAuthStep('phone')}
-                  className={`min-h-[40px] px-3 py-2 rounded-xl border ${palette.border} text-xs`}
+                  onClick={() => {
+                    setAuthStep('phone');
+                    setAuthError('');
+                  }}
+                  className={`min-h-[42px] px-3.5 py-2 rounded-xl border ${palette.border} text-xs font-medium`}
                 >
                   Back
                 </button>
               ) : (
-                <div />
-              )}
-
-              <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setShowAuthModal(false)}
-                  className={`min-h-[40px] px-4 py-2 rounded-xl border ${palette.border} text-xs`}
+                  className={`min-h-[42px] px-3.5 py-2 rounded-xl border ${palette.border} text-xs font-medium`}
                 >
                   Cancel
                 </button>
-                <button
-                  type="submit"
-                  disabled={authLoading}
-                  className="min-h-[40px] px-4 py-2 rounded-xl bg-sky-500 text-slate-950 text-xs font-semibold"
-                >
-                  {authLoading
-                    ? 'Please wait...'
-                    : authStep === 'phone'
-                    ? 'Send Code'
-                    : authStep === '2fa'
-                    ? 'Verify 2FA & Login'
-                    : twoFactorEnabledToggle && authMode === 'existing_user'
-                    ? 'Next (2FA)'
-                    : 'Verify & Login'}
-                </button>
-              </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={authLoading}
+                className="flex-1 min-h-[42px] px-5 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 text-xs font-bold"
+              >
+                {authLoading
+                  ? 'Connecting to Telegram...'
+                  : authStep === 'phone'
+                  ? 'Continue'
+                  : authStep === 'otp'
+                  ? 'Next'
+                  : authStep === '2fa'
+                  ? 'Verify Password'
+                  : 'Start Messaging & Calling'}
+              </button>
             </div>
           </form>
         </div>
