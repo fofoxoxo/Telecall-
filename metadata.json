@@ -1,0 +1,6 @@
+{
+  "name": "TeleCall",
+  "description": "Low-latency, low-network E2EE Telegram MTProto voice calling client and 1000+ user topic-based voice rooms with Android APK GitHub Actions workflow.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,132 @@
+name: TeleCall Android APK Builder (Main, Dev WebView & Production Signed)
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+      - dev
+  workflow_dispatch:
+    inputs:
+      build_mode:
+        description: 'Select APK Type: debug (main), dev-webview (live reload), or production-release (signed)'
+        required: true
+        default: 'dev-webview'
+        type: choice
+        options:
+          - debug
+          - dev-webview
+          - production-release
+      webview_url:
+        description: 'Live Server / WebView URL (Optional - used for dev-webview APK)'
+        required: false
+        default: 'https://ais-pre-xfn5k5hyj4aiqlwlaul5tn-771261258696.asia-southeast1.run.app'
+
+jobs:
+  build-android-apk:
+    name: Build TeleCall Android APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Setup Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NPM Dependencies
+        run: npm install
+
+      - name: Determine Build Environment & WebView Config
+        id: config
+        run: |
+          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+          MODE="${{ github.event.inputs.build_mode }}"
+          if [ -z "$MODE" ]; then
+            if [ "$BRANCH_NAME" = "dev" ]; then
+              MODE="dev-webview"
+            else
+              MODE="debug"
+            fi
+          fi
+          echo "mode=$MODE" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+      - name: Build Web Bundle (Vite)
+        env:
+          VITE_TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          VITE_TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          VITE_WEBVIEW_SERVER_URL: ${{ github.event.inputs.webview_url || secrets.WEBVIEW_SERVER_URL || 'https://ais-pre-xfn5k5hyj4aiqlwlaul5tn-771261258696.asia-southeast1.run.app' }}
+        run: npm run build
+
+      - name: Initialize & Sync Capacitor Android Platform
+        env:
+          BUILD_ENV: ${{ steps.config.outputs.mode == 'dev-webview' && 'dev' || 'main' }}
+          WEBVIEW_SERVER_URL: ${{ steps.config.outputs.mode == 'dev-webview' && (github.event.inputs.webview_url || secrets.WEBVIEW_SERVER_URL) || '' }}
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+
+      - name: Inject Android Microphone, Audio & Internet Permissions
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ]; then
+            sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <uses-permission android:name="android.permission.BLUETOOTH" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.READ_CONTACTS" />' "$MANIFEST"
+          fi
+
+      - name: Build Debug / Dev-WebView APK
+        if: steps.config.outputs.mode != 'production-release'
+        working-directory: ./android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk ../telecall-${{ steps.config.outputs.branch }}-${{ steps.config.outputs.mode }}.apk
+
+      - name: Sign & Build Production Release APK
+        if: steps.config.outputs.mode == 'production-release'
+        working-directory: ./android
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || 'telecall123' }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || 'telecall-key' }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || 'telecall123' }}
+        run: |
+          chmod +x gradlew
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > release-key.jks
+          else
+            # Auto-generate self-signed production keystore if user hasn't uploaded one yet on phone
+            keytool -genkey -v -keystore release-key.jks -keyalg RSA -keysize 2048 -validity 10000 -alias "$KEY_ALIAS" -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" -dname "CN=TeleCall, OU=Mobile, O=TeleCall, L=Mumbai, S=MH, C=IN"
+          fi
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=$(pwd)/release-key.jks \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+          cp app/build/outputs/apk/release/app-release.apk ../telecall-production-signed.apk
+
+      - name: Upload APK Artifact (Download directly on Android Phone)
+        uses: actions/upload-artifact@v4
+        with:
+          name: telecall-apk-${{ steps.config.outputs.branch }}-${{ steps.config.outputs.mode }}
+          path: '*.apk'
+          retention-days: 30
