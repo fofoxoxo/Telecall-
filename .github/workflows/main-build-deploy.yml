@@ -129,12 +129,10 @@ jobs:
           cat << EOF > capacitor.config.json
           {
             "appId": "com.telecall.dev",
-            "appName": "TeleCall Dev",
+            "appName": "TeleCall",
             "webDir": "dist",
             "server": {
-              "url": "${{ env.FINAL_WEBVIEW_URL }}",
               "cleartext": true,
-              "errorPath": "index.html",
               "androidScheme": "https",
               "allowNavigation": ["*"]
             },

@@ -30,13 +30,23 @@ import {
   MessageSquare,
   PhoneCall,
   LogOut,
-  Edit3
+  Edit3,
+  Menu,
+  Clock,
+  AtSign,
+  Layers
 } from 'lucide-react';
 import {
   mtprotoEngine,
   MTProtoSessionData,
-  AuthDeliveryMethod
+  AuthDeliveryMethod,
+  apiFetch
 } from './services/mtprotoClient';
+import {
+  SettingsDrawer,
+  AppThemeId,
+  THEME_PALETTES
+} from './components/SettingsDrawer';
 
 interface VoiceParticipant {
   id: string;
@@ -78,9 +88,12 @@ interface CallLogEntry {
   id: string;
   contactName: string;
   phone: string;
+  username?: string;
   direction: 'outgoing' | 'incoming';
   durationSeconds: number;
   timestamp: string;
+  codecUsed?: string;
+  dhEmojis?: string[];
 }
 
 interface ActiveCallState {
@@ -93,7 +106,8 @@ interface ActiveCallState {
   lowNetworkMode: boolean;
 }
 
-const TOPICS = [
+// 6 Categories for the 3-Column Category Tag Grid on Voice Rooms Tab
+const CATEGORY_GRID_TAGS = [
   'All',
   'Education & Exams',
   'Technology & Startups',
@@ -104,14 +118,30 @@ const TOPICS = [
 
 const DIAL_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '0', '#'];
 const RECENT_ROOMS_STORAGE_KEY = 'telecall_recent_joined_room_ids';
+const THEME_STORAGE_KEY = 'telecall_active_theme';
 
 export default function App() {
+  // Theme Engine State
+  const [activeTheme, setActiveTheme] = useState<AppThemeId>(() => {
+    const saved = localStorage.getItem(THEME_STORAGE_KEY) as AppThemeId | null;
+    return saved && THEME_PALETTES[saved] ? saved : 'telegram-dark';
+  });
+  const palette = THEME_PALETTES[activeTheme];
+
+  const handleSelectTheme = (theme: AppThemeId) => {
+    setActiveTheme(theme);
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  };
+
+  // Hamburger Settings Drawer State
+  const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
+
   // Initialize MTProto Session from StringSession storage
   const [session, setSession] = useState<MTProtoSessionData | null>(() =>
     mtprotoEngine.getSavedSession()
   );
 
-  // Telegram Auth Flow States (Existing User Login with OTP + 2FA OR New User Sign Up via SMS, Call, or Email OTP)
+  // Telegram Auth Flow States (Primary Telegram Account via MTProto + Custom TeleChats Profile Layer)
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
   const [authMode, setAuthMode] = useState<'existing_user' | 'new_user'>('existing_user');
   const [authStep, setAuthStep] = useState<'phone' | 'otp' | '2fa'>('phone');
@@ -127,11 +157,12 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
 
-  // Telegram Profile Edit States
-  const [isEditingProfile, setIsEditingProfile] = useState(false);
-  const [editName, setEditName] = useState('');
-  const [editUsername, setEditUsername] = useState('');
-  const [editBio, setEditBio] = useState('');
+  // Custom TeleChats Profile Layer Edit States (on top of synced primary Telegram profile)
+  const [isEditingTelechatsLayer, setIsEditingTelechatsLayer] = useState(false);
+  const [editTelechatsName, setEditTelechatsName] = useState('');
+  const [editTelechatsHandle, setEditTelechatsHandle] = useState('');
+  const [editTelechatsStatus, setEditTelechatsStatus] = useState('');
+  const [editTelechatsCategory, setEditTelechatsCategory] = useState('Education & Exams');
 
   const currentUser: MTProtoSessionData = session || {
     dcId: 5,
@@ -140,20 +171,25 @@ export default function App() {
     userId: 'tg-user-local',
     phone: '+91 98200 11223',
     name: 'Aarav Verma',
-    username: '@aarav_telecall',
-    bio: 'Available on TeleCall · Low-Latency Voice & Rooms',
+    username: '@aarav_tg',
+    bio: 'Synced from Primary Telegram Account (MTProto DC5)',
     twoFactorEnabled: true,
+    telechatsDisplayName: 'Aarav Verma (Host)',
+    telechatsHandle: '@aarav.telechats',
+    telechatsStatus: 'Hosting Daily UPSC & Tech Voice Rooms',
+    telechatsCategoryTag: 'Education & Exams',
     createdAt: Date.now()
   };
 
-  // Bottom Footer Navigation: Strictly 3 options ('calls' | 'rooms' | 'profile')
+  // Main Navigation: 3 Primary Bottom Tabs ('calls' | 'rooms' | 'profile')
   const [activeBottomTab, setActiveBottomTab] = useState<'calls' | 'rooms' | 'profile'>('calls');
 
-  // Floating Switcher on Calls Page: Call Logs | Dialer | Contacts
+  // Calls Tab Floating Sub-Views: Call Logs | Thumb-Zone Dialer | Contacts
   const [callsSubTab, setCallsSubTab] = useState<'logs' | 'dialer' | 'contacts'>('logs');
-  const [dialedNumber, setDialedNumber] = useState('+91 ');
+  const [dialedInput, setDialedInput] = useState('+91 ');
+  const [selectedCallerHistoryPhone, setSelectedCallerHistoryPhone] = useState<string | null>(null);
 
-  // Recently Joined Room IDs (Shown in Voice Rooms Header strip + feed)
+  // Recently Joined Room IDs
   const [recentRoomIds, setRecentRoomIds] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem(RECENT_ROOMS_STORAGE_KEY);
@@ -163,7 +199,7 @@ export default function App() {
     }
   });
 
-  // Data States
+  // Rooms State
   const [rooms, setRooms] = useState<VoiceRoom[]>(() => {
     const saved = localStorage.getItem('telecall_rooms_cache');
     if (saved) {
@@ -278,21 +314,38 @@ export default function App() {
       id: 'log-1',
       contactName: 'Aarav Sharma',
       phone: '+91 98201 44512',
+      username: '@aarav_tg',
       direction: 'outgoing',
       durationSeconds: 342,
-      timestamp: 'Today, 9:40 PM'
+      timestamp: 'Today, 9:40 PM',
+      codecUsed: 'Opus 12 kbps (Low-Latency SFU)',
+      dhEmojis: ['🔐', '🚀', '🦁', '🎸']
     },
     {
       id: 'log-2',
       contactName: 'Priya Verma',
       phone: '+91 98114 22089',
+      username: '@priya_v',
       direction: 'incoming',
       durationSeconds: 128,
-      timestamp: 'Today, 7:15 PM'
+      timestamp: 'Today, 7:15 PM',
+      codecUsed: 'Opus 8 kbps (2G Ultra-Saver)',
+      dhEmojis: ['⚡', '💎', '🌍', '🔥']
+    },
+    {
+      id: 'log-3',
+      contactName: 'Aarav Sharma',
+      phone: '+91 98201 44512',
+      username: '@aarav_tg',
+      direction: 'incoming',
+      durationSeconds: 195,
+      timestamp: 'Yesterday, 8:10 PM',
+      codecUsed: 'Opus 24 kbps (4G Standard)',
+      dhEmojis: ['🔐', '🚀', '🦁', '🎸']
     }
   ]);
 
-  // Voice Rooms Header Search & Topic Filter
+  // Voice Rooms Search & 3-Column Category Tag Filter
   const [roomSearchQuery, setRoomSearchQuery] = useState('');
   const [selectedTopic, setSelectedTopic] = useState('All');
 
@@ -358,18 +411,17 @@ export default function App() {
       }
     });
 
-    // Check if user opened a group invite link (?room=inviteCode)
     const params = new URLSearchParams(window.location.search);
     const roomInviteParam = params.get('room');
     if (roomInviteParam) {
       setActiveBottomTab('rooms');
-      fetch('/api/rooms/join-by-code', {
+      apiFetch('/api/rooms/join-by-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           code: roomInviteParam,
           userId: currentUser.userId,
-          name: currentUser.name,
+          name: currentUser.telechatsDisplayName || currentUser.name,
           phone: currentUser.phone
         })
       })
@@ -391,7 +443,7 @@ export default function App() {
     return () => {
       unsubEvents();
     };
-  }, [currentUser.userId, currentUser.name, currentUser.phone]);
+  }, [currentUser.userId, currentUser.name, currentUser.phone, currentUser.telechatsDisplayName]);
 
   useEffect(() => {
     if (!activeCall) {
@@ -435,15 +487,15 @@ export default function App() {
   };
 
   const startCall = async (contactName: string, phone: string, calleeId = 'remote') => {
-    if (!phone.trim()) return;
+    if (!phone.trim() && !contactName.trim()) return;
     playTone(540, 0.14);
     try {
-      const res = await fetch('/api/call/handshake', {
+      const res = await apiFetch('/api/call/handshake', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           callerId: currentUser.userId,
-          callerName: currentUser.name,
+          callerName: currentUser.telechatsDisplayName || currentUser.name,
           calleeId,
           contactName,
           phone
@@ -460,6 +512,17 @@ export default function App() {
         lowNetworkMode: true
       });
     } catch {
+      const newLog: CallLogEntry = {
+        id: 'log-' + Date.now(),
+        contactName,
+        phone,
+        direction: 'outgoing',
+        durationSeconds: 0,
+        timestamp: 'Just now',
+        codecUsed: 'Opus 12 kbps (SFU)',
+        dhEmojis: ['🔐', '🚀', '🦁', '🎸']
+      };
+      setCallLogs((prev) => [newLog, ...prev]);
       setActiveCall({
         contactName,
         phone,
@@ -472,7 +535,7 @@ export default function App() {
     }
   };
 
-  // --- TELEGRAM LOGIN & NEW USER REGISTRATION HANDLERS ---
+  // --- TELEGRAM MTPROTO LOGIN & CUSTOM TELECHATS PROFILE HANDLERS ---
 
   const openAuthModal = (mode: 'existing_user' | 'new_user' = 'existing_user') => {
     setAuthMode(mode);
@@ -514,7 +577,6 @@ export default function App() {
     e.preventDefault();
     setAuthError('');
 
-    // If user is on OTP step and has 2FA Cloud Password enabled, transition to 2FA step first
     if (authStep === 'otp' && authMode === 'existing_user' && twoFactorEnabledToggle) {
       setAuthStep('2fa');
       return;
@@ -542,7 +604,20 @@ export default function App() {
     }
 
     if (res.ok && res.sessionData) {
-      setSession(res.sessionData);
+      const enriched: MTProtoSessionData = {
+        ...res.sessionData,
+        telechatsDisplayName:
+          res.sessionData.telechatsDisplayName || `${res.sessionData.name} (TeleChats)`,
+        telechatsHandle:
+          res.sessionData.telechatsHandle ||
+          `${res.sessionData.username.replace(/_tg$/, '')}.telechats`,
+        telechatsStatus:
+          res.sessionData.telechatsStatus || 'Active on TeleChats Voice Rooms',
+        telechatsCategoryTag:
+          res.sessionData.telechatsCategoryTag || 'Education & Exams'
+      };
+      mtprotoEngine.updateSavedProfile(enriched);
+      setSession(enriched);
       setShowAuthModal(false);
       setAuthStep('phone');
       setTwoFactorPassword('');
@@ -551,30 +626,26 @@ export default function App() {
     }
   };
 
-  const handleSaveProfileEdits = (e: React.FormEvent) => {
+  const handleSaveTelechatsLayer = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanedUsername = editUsername.trim().startsWith('@')
-      ? editUsername.trim()
-      : `@${editUsername.trim().replace(/^@/, '')}`;
+    const cleanedHandle = editTelechatsHandle.trim().startsWith('@')
+      ? editTelechatsHandle.trim()
+      : `@${editTelechatsHandle.trim().replace(/^@/, '')}`;
 
-    const updated = mtprotoEngine.updateSavedProfile({
-      name: editName.trim() || currentUser.name,
-      username: cleanedUsername || currentUser.username,
-      bio: editBio.trim()
-    });
+    const updates: Partial<MTProtoSessionData> = {
+      telechatsDisplayName: editTelechatsName.trim() || currentUser.name,
+      telechatsHandle: cleanedHandle || '@user.telechats',
+      telechatsStatus: editTelechatsStatus.trim() || 'Active on TeleChats',
+      telechatsCategoryTag: editTelechatsCategory
+    };
 
+    const updated = mtprotoEngine.updateSavedProfile(updates);
     if (updated) {
       setSession(updated);
     } else {
-      const nextSession: MTProtoSessionData = {
-        ...currentUser,
-        name: editName.trim() || currentUser.name,
-        username: cleanedUsername || currentUser.username,
-        bio: editBio.trim()
-      };
-      setSession(nextSession);
+      setSession({ ...currentUser, ...updates });
     }
-    setIsEditingProfile(false);
+    setIsEditingTelechatsLayer(false);
   };
 
   const handleSyncContacts = async (e?: React.FormEvent) => {
@@ -585,7 +656,7 @@ export default function App() {
         ? [{ name: newContactName.trim(), phone: newContactPhone.trim() }]
         : [];
     try {
-      const res = await fetch('/api/contacts/sync', {
+      const res = await apiFetch('/api/contacts/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ customContacts })
@@ -608,8 +679,10 @@ export default function App() {
       .map((r) => r.trim())
       .filter(Boolean);
 
+    const hostDisplayName = currentUser.telechatsDisplayName || currentUser.name;
+
     try {
-      const res = await fetch('/api/rooms', {
+      const res = await apiFetch('/api/rooms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -618,7 +691,7 @@ export default function App() {
           visibility: newRoomVisibility,
           rules,
           hostId: currentUser.userId,
-          hostName: currentUser.name,
+          hostName: hostDisplayName,
           hostPhone: currentUser.phone
         })
       });
@@ -645,7 +718,7 @@ export default function App() {
         inviteCode: Math.random().toString(36).slice(2, 8),
         rules,
         hostId: currentUser.userId,
-        hostName: currentUser.name,
+        hostName: hostDisplayName,
         createdAt: new Date().toISOString(),
         maxCapacity: 5000,
         lowBandwidthMode: true,
@@ -653,7 +726,7 @@ export default function App() {
         participants: [
           {
             id: currentUser.userId,
-            name: currentUser.name,
+            name: hostDisplayName,
             phone: currentUser.phone,
             role: 'host',
             isMuted: false,
@@ -679,14 +752,15 @@ export default function App() {
   const handleJoinRoom = async (room: VoiceRoom) => {
     playTone(580, 0.12);
     recordRecentRoom(room.id);
+    const displayName = currentUser.telechatsDisplayName || currentUser.name;
 
     try {
-      const res = await fetch(`/api/rooms/${room.id}/join`, {
+      const res = await apiFetch(`/api/rooms/${room.id}/join`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           userId: currentUser.userId,
-          name: currentUser.name,
+          name: displayName,
           phone: currentUser.phone
         })
       });
@@ -712,7 +786,7 @@ export default function App() {
             ...r.participants,
             {
               id: currentUser.userId,
-              name: currentUser.name,
+              name: displayName,
               phone: currentUser.phone,
               role: r.hostId === currentUser.userId ? 'host' : 'listener',
               isMuted: r.hostId !== currentUser.userId,
@@ -732,13 +806,13 @@ export default function App() {
     e.preventDefault();
     setInviteError('');
     try {
-      const res = await fetch('/api/rooms/join-by-code', {
+      const res = await apiFetch('/api/rooms/join-by-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           code: inviteLinkInput,
           userId: currentUser.userId,
-          name: currentUser.name,
+          name: currentUser.telechatsDisplayName || currentUser.name,
           phone: currentUser.phone
         })
       });
@@ -807,7 +881,7 @@ export default function App() {
       })
     );
     try {
-      await fetch(`/api/rooms/${roomId}/action`, {
+      await apiFetch(`/api/rooms/${roomId}/action`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -826,7 +900,6 @@ export default function App() {
     }
   };
 
-  // Recently Joined Rooms (in the exact order user joined them)
   const recentlyJoinedRooms = recentRoomIds
     .map((id) => rooms.find((r) => r.id === id))
     .filter((r): r is VoiceRoom => Boolean(r));
@@ -854,6 +927,22 @@ export default function App() {
     return matchesTopic && matchesQuery;
   });
 
+  // Match contacts by @username or phone number inside the Thumb-Zone Dialer
+  const dialerMatches = contacts.filter((c) => {
+    const q = dialedInput.trim().toLowerCase();
+    if (!q || q === '+91') return false;
+    return (
+      c.username.toLowerCase().includes(q) ||
+      c.name.toLowerCase().includes(q) ||
+      c.phone.replace(/\s+/g, '').includes(q.replace(/\s+/g, ''))
+    );
+  });
+
+  // Detailed Caller History for the clicked Call Log tile
+  const selectedCallerLogs = selectedCallerHistoryPhone
+    ? callLogs.filter((l) => l.phone === selectedCallerHistoryPhone)
+    : [];
+
   const activeJoinedRoom = rooms.find((r) => r.id === joinedRoomId) || null;
 
   const formatDuration = (secs: number) => {
@@ -863,130 +952,64 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#0b141a] text-slate-100 flex flex-col max-w-2xl mx-auto border-x border-slate-800/60">
-      {/* TOP HEADER BY ACTIVE TAB */}
-      {activeBottomTab === 'calls' && (
-        <header className="sticky top-0 z-30 h-14 px-4 bg-[#111b21]/95 backdrop-blur-md border-b border-slate-800 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-lg font-bold tracking-tight text-white">TeleCall</span>
-          </div>
+    <div
+      className={`min-h-screen ${palette.bgMain} ${palette.textPrimary} flex flex-col max-w-2xl mx-auto border-x ${palette.border}`}
+    >
+      {/* COMMON STICKY HEADER: App Name ("TeleCall") + Hamburger Settings Menu */}
+      <header
+        className={`sticky top-0 z-30 h-14 px-4 ${palette.bgCard} border-b ${palette.border} flex items-center justify-between`}
+      >
+        <div className="flex items-center gap-2.5">
+          <span className="text-lg font-bold tracking-tight">TeleCall</span>
+          <span className={`text-[11px] font-medium ${palette.accentText}`}>
+            {activeBottomTab === 'calls'
+              ? '· Calls'
+              : activeBottomTab === 'rooms'
+              ? '· Voice Rooms'
+              : '· Profile'}
+          </span>
+        </div>
 
+        <div className="flex items-center gap-2">
           <button
             onClick={() =>
               session ? setActiveBottomTab('profile') : openAuthModal('existing_user')
             }
-            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition-colors whitespace-nowrap flex items-center gap-1.5"
+            className={`min-h-[38px] px-3 py-1.5 rounded-xl border ${palette.border} text-xs font-medium flex items-center gap-1.5`}
           >
-            <User className="w-3.5 h-3.5 text-sky-400" />
-            <span>{session ? session.name : 'Telegram Login'}</span>
+            <User className={`w-3.5 h-3.5 ${palette.accentText}`} />
+            <span className="max-w-[110px] truncate">
+              {session ? currentUser.telechatsDisplayName || session.name : 'Telegram Login'}
+            </span>
           </button>
-        </header>
-      )}
 
-      {activeBottomTab === 'rooms' && (
-        /* VOICE ROOMS HEADER: Search, Create or Join Group + Recently Joined Rooms Bar */
-        <header className="sticky top-0 z-30 bg-[#111b21]/95 backdrop-blur-md border-b border-slate-800 px-4 py-2.5 space-y-2.5">
-          <div className="flex items-center gap-2">
-            <div className="relative flex-1">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                value={roomSearchQuery}
-                onChange={(e) => setRoomSearchQuery(e.target.value)}
-                placeholder="Search voice rooms or topics..."
-                className="w-full h-10 pl-9 pr-3 bg-[#0b141a] border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
-              />
-            </div>
-
-            <button
-              onClick={() => setShowJoinByLinkModal(true)}
-              className="min-h-[40px] px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 shrink-0 whitespace-nowrap"
-            >
-              <Link2 className="w-3.5 h-3.5 text-sky-400" />
-              <span>Join Group</span>
-            </button>
-
-            <button
-              onClick={() => setShowCreateRoomModal(true)}
-              className="min-h-[40px] px-3.5 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs flex items-center gap-1.5 shrink-0 whitespace-nowrap"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Create</span>
-            </button>
-          </div>
-
-          {/* Header Recently Joined Rooms Strip */}
-          {recentlyJoinedRooms.length > 0 && !activeJoinedRoom && (
-            <div className="pt-1 border-t border-slate-800/80">
-              <div className="text-[11px] font-medium text-slate-400 mb-1.5">
-                Recently Joined Voice Rooms
-              </div>
-              <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
-                {recentlyJoinedRooms.map((recentRoom) => (
-                  <button
-                    key={recentRoom.id}
-                    onClick={() => handleJoinRoom(recentRoom)}
-                    className="min-h-[36px] px-3 py-1.5 rounded-xl bg-[#0b141a] hover:bg-slate-800/90 border border-slate-800 flex items-center gap-2 shrink-0 text-left transition-colors"
-                  >
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
-                    <span className="text-xs font-semibold text-white truncate max-w-[160px]">
-                      {recentRoom.title}
-                    </span>
-                    <span className="text-[11px] text-sky-400 tabular-nums shrink-0">
-                      {recentRoom.listenerCount}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </header>
-      )}
-
-      {activeBottomTab === 'profile' && (
-        <header className="sticky top-0 z-30 h-14 px-4 bg-[#111b21]/95 backdrop-blur-md border-b border-slate-800 flex items-center justify-between">
-          <span className="text-lg font-bold tracking-tight text-white">Telegram Profile</span>
-          {!session ? (
-            <button
-              onClick={() => openAuthModal('existing_user')}
-              className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-sky-500 text-slate-950 text-xs font-semibold"
-            >
-              Login with Telegram
-            </button>
-          ) : (
-            <button
-              onClick={() => {
-                mtprotoEngine.logout();
-                setSession(null);
-              }}
-              className="min-h-[38px] px-3 py-1.5 rounded-xl bg-rose-500/15 text-rose-300 border border-rose-500/30 text-xs font-medium flex items-center gap-1.5"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              <span>Log Out</span>
-            </button>
-          )}
-        </header>
-      )}
+          <button
+            onClick={() => setShowSettingsDrawer(true)}
+            aria-label="Open Settings Menu"
+            className={`min-h-[38px] min-w-[38px] rounded-xl border ${palette.border} flex items-center justify-center hover:border-sky-500/60`}
+          >
+            <Menu className="w-4 h-4" />
+          </button>
+        </div>
+      </header>
 
       {/* MAIN SCROLLABLE VIEWPORT */}
       <main className="flex-1 px-4 py-4 pb-36">
         {/* ACTIVE VOICE ROOM FULL SCREEN STAGE */}
         {activeJoinedRoom ? (
-          <div className="bg-[#111b21] border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-5">
-            <div className="flex items-start justify-between gap-3 pb-4 border-b border-slate-800">
+          <div className={`${palette.bgCard} border ${palette.border} rounded-2xl p-4 sm:p-5 space-y-5`}>
+            <div className={`flex items-start justify-between gap-3 pb-4 border-b ${palette.border}`}>
               <div className="min-w-0">
                 <button
                   onClick={() => setJoinedRoomId(null)}
-                  className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-white mb-1.5"
+                  className={`inline-flex items-center gap-1.5 text-xs ${palette.textSecondary} hover:opacity-100 mb-1.5`}
                 >
                   <ArrowLeft className="w-4 h-4" />
                   <span>Back to Voice Rooms</span>
                 </button>
-                <h1 className="text-lg font-bold text-white leading-snug">
-                  {activeJoinedRoom.title}
-                </h1>
-                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 mt-1 tabular-nums">
-                  <span className="text-sky-400 font-medium">{activeJoinedRoom.topic}</span>
+                <h1 className="text-lg font-bold leading-snug">{activeJoinedRoom.title}</h1>
+                <div className={`flex flex-wrap items-center gap-2 text-xs ${palette.textSecondary} mt-1 tabular-nums`}>
+                  <span className={`${palette.accentText} font-medium`}>{activeJoinedRoom.topic}</span>
                   <span>·</span>
                   <span>
                     {activeJoinedRoom.visibility === 'private' ? 'Private Group' : 'Public Group'}
@@ -999,9 +1022,9 @@ export default function App() {
               <div className="flex items-center gap-2 shrink-0">
                 <button
                   onClick={() => setRoomPreviewRules(activeJoinedRoom)}
-                  className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 whitespace-nowrap"
+                  className={`min-h-[40px] px-3 py-1.5 rounded-xl border ${palette.border} text-xs font-medium flex items-center gap-1.5 whitespace-nowrap`}
                 >
-                  <BookOpen className="w-3.5 h-3.5 text-sky-400" />
+                  <BookOpen className={`w-3.5 h-3.5 ${palette.accentText}`} />
                   <span>Rules</span>
                 </button>
 
@@ -1012,7 +1035,7 @@ export default function App() {
                       `${window.location.origin}/?room=${activeJoinedRoom.inviteCode}`
                     )
                   }
-                  className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-sky-300 flex items-center gap-1.5 whitespace-nowrap"
+                  className={`min-h-[40px] px-3 py-1.5 rounded-xl border ${palette.border} text-xs font-medium ${palette.accentText} flex items-center gap-1.5 whitespace-nowrap`}
                 >
                   {copiedId === 'room-link' ? (
                     <>
@@ -1039,7 +1062,7 @@ export default function App() {
             {/* Speakers Stage */}
             <div>
               <div className="flex items-center justify-between mb-2.5">
-                <h2 className="text-xs font-semibold text-slate-400">
+                <h2 className={`text-xs font-semibold ${palette.textSecondary}`}>
                   Speakers ({activeJoinedRoom.participants.filter((p) => p.role !== 'listener').length})
                 </h2>
                 {activeJoinedRoom.hostId === currentUser.userId && (
@@ -1049,7 +1072,7 @@ export default function App() {
                       setNewRoomRulesText(activeJoinedRoom.rules.join('\n'));
                       setShowEditRulesModal(true);
                     }}
-                    className="text-xs text-sky-400 hover:underline"
+                    className={`text-xs ${palette.accentText} hover:underline`}
                   >
                     Edit Topic & Rules
                   </button>
@@ -1061,12 +1084,12 @@ export default function App() {
                   .map((p) => (
                     <div
                       key={p.id}
-                      className={`p-3 rounded-xl bg-[#0b141a] border ${
-                        !p.isMuted ? 'border-emerald-500/60' : 'border-slate-800'
+                      className={`p-3 rounded-xl ${palette.bgMain} border ${
+                        !p.isMuted ? 'border-emerald-500/60' : palette.border
                       }`}
                     >
                       <div className="flex items-center justify-between mb-1.5">
-                        <div className="w-9 h-9 rounded-full bg-sky-500/20 text-sky-300 flex items-center justify-center font-bold text-xs">
+                        <div className="w-9 h-9 rounded-full bg-sky-500/20 text-sky-400 flex items-center justify-center font-bold text-xs">
                           {p.name.slice(0, 2).toUpperCase()}
                         </div>
                         {p.isMuted ? (
@@ -1075,8 +1098,8 @@ export default function App() {
                           <Mic className="w-4 h-4 text-emerald-400" />
                         )}
                       </div>
-                      <div className="text-xs font-semibold text-white truncate">{p.name}</div>
-                      <div className="text-[11px] text-slate-400">
+                      <div className="text-xs font-semibold truncate">{p.name}</div>
+                      <div className={`text-[11px] ${palette.textSecondary}`}>
                         {p.role === 'host' ? 'Host' : 'Speaker'}
                       </div>
                       {activeJoinedRoom.hostId === currentUser.userId &&
@@ -1085,7 +1108,7 @@ export default function App() {
                             onClick={() =>
                               handleRoomAction(activeJoinedRoom.id, 'move-to-listener', p.id)
                             }
-                            className="mt-2 w-full py-1 rounded-lg bg-slate-800 text-[10px] text-slate-300"
+                            className={`mt-2 w-full py-1 rounded-lg border ${palette.border} text-[10px]`}
                           >
                             Move to Listeners
                           </button>
@@ -1097,7 +1120,7 @@ export default function App() {
 
             {/* Listeners */}
             <div>
-              <h2 className="text-xs font-semibold text-slate-400 mb-2.5 tabular-nums">
+              <h2 className={`text-xs font-semibold ${palette.textSecondary} mb-2.5 tabular-nums`}>
                 Listeners ({activeJoinedRoom.listenerCount.toLocaleString()} active)
               </h2>
               <div className="space-y-2">
@@ -1106,17 +1129,15 @@ export default function App() {
                   .map((p) => (
                     <div
                       key={p.id}
-                      className="p-2.5 rounded-xl bg-[#0b141a] border border-slate-800/80 flex items-center justify-between gap-2"
+                      className={`p-2.5 rounded-xl ${palette.bgMain} border ${palette.border} flex items-center justify-between gap-2`}
                     >
                       <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="w-8 h-8 rounded-full bg-slate-800 text-slate-300 flex items-center justify-center font-semibold text-xs shrink-0">
+                        <div className="w-8 h-8 rounded-full bg-sky-500/15 text-sky-400 flex items-center justify-center font-semibold text-xs shrink-0">
                           {p.name.slice(0, 2).toUpperCase()}
                         </div>
                         <div className="min-w-0">
-                          <div className="text-xs font-medium text-slate-200 truncate">
-                            {p.name}
-                          </div>
-                          <div className="text-[11px] text-slate-400">
+                          <div className="text-xs font-medium truncate">{p.name}</div>
+                          <div className={`text-[11px] ${palette.textSecondary}`}>
                             {p.handRaised ? '✋ Raised hand to speak' : 'Listening'}
                           </div>
                         </div>
@@ -1127,7 +1148,7 @@ export default function App() {
                           onClick={() =>
                             handleRoomAction(activeJoinedRoom.id, 'promote-speaker', p.id)
                           }
-                          className="min-h-[34px] px-3 py-1 rounded-lg bg-sky-500/20 text-sky-300 text-xs font-medium shrink-0"
+                          className="min-h-[34px] px-3 py-1 rounded-lg bg-sky-500/20 text-sky-400 text-xs font-medium shrink-0"
                         >
                           Allow to Speak
                         </button>
@@ -1138,12 +1159,12 @@ export default function App() {
             </div>
 
             {/* Bottom Controls inside Voice Room */}
-            <div className="pt-3 border-t border-slate-800 flex items-center justify-between gap-3">
+            <div className={`pt-3 border-t ${palette.border} flex items-center justify-between gap-3`}>
               <button
                 onClick={() => handleRoomAction(activeJoinedRoom.id, 'toggle-mute')}
                 className={`flex-1 min-h-[44px] py-2.5 rounded-xl font-semibold text-xs flex items-center justify-center gap-2 ${
                   activeJoinedRoom.participants.find((p) => p.id === currentUser.userId)?.isMuted
-                    ? 'bg-slate-800 text-slate-200'
+                    ? `border ${palette.border}`
                     : 'bg-emerald-500 text-slate-950'
                 }`}
               >
@@ -1164,8 +1185,8 @@ export default function App() {
                 onClick={() => handleRoomAction(activeJoinedRoom.id, 'toggle-hand')}
                 className={`flex-1 min-h-[44px] py-2.5 rounded-xl font-semibold text-xs flex items-center justify-center gap-2 ${
                   activeJoinedRoom.participants.find((p) => p.id === currentUser.userId)?.handRaised
-                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                    : 'bg-slate-800 text-slate-200'
+                    ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
+                    : `border ${palette.border}`
                 }`}
               >
                 <Hand className="w-4 h-4" />
@@ -1180,110 +1201,220 @@ export default function App() {
           </div>
         ) : (
           <>
-            {/* FOOTER TAB 1: CALLS (Call Logs, Dialer, Contacts) */}
+            {/* =================================================================== */}
+            {/* PRIMARY TAB 1: CALLS (Call Logs | Thumb-Zone Dialer | Contacts)     */}
+            {/* =================================================================== */}
             {activeBottomTab === 'calls' && (
               <div className="space-y-4">
-                {/* Sub-Tab 1: Call Logs */}
+                {/* Sub-Screen 1: Call Logs (Click any tile for Detailed Info & Caller History) */}
                 {callsSubTab === 'logs' && (
-                  <div className="bg-[#111b21] border border-slate-800 rounded-2xl divide-y divide-slate-800/80">
-                    {callLogs.map((log) => (
-                      <div
-                        key={log.id}
-                        className="p-3.5 flex items-center justify-between gap-3"
-                      >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div className="w-10 h-10 rounded-full bg-slate-800 text-sky-300 flex items-center justify-center font-bold text-xs shrink-0">
-                            {log.contactName.slice(0, 2).toUpperCase()}
-                          </div>
-                          <div className="min-w-0">
-                            <div className="text-sm font-semibold text-white truncate">
-                              {log.contactName}
-                            </div>
-                            <div className="flex items-center gap-1.5 text-xs text-slate-400 mt-0.5 tabular-nums">
-                              {log.direction === 'outgoing' ? (
-                                <PhoneOutgoing className="w-3.5 h-3.5 text-emerald-400" />
-                              ) : (
-                                <PhoneIncoming className="w-3.5 h-3.5 text-sky-400" />
-                              )}
-                              <span>{log.timestamp}</span>
-                              {log.durationSeconds > 0 && (
-                                <>
-                                  <span>·</span>
-                                  <span>{formatDuration(log.durationSeconds)}</span>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                        </div>
+                  <div className="space-y-3">
+                    <div className={`${palette.bgCard} border ${palette.border} rounded-2xl divide-y divide-slate-800/60`}>
+                      {callLogs.map((log) => {
+                        const isExpanded = selectedCallerHistoryPhone === log.phone;
+                        return (
+                          <div key={log.id} className="p-3.5 space-y-3">
+                            <div className="flex items-center justify-between gap-3">
+                              {/* Clicking the caller tile opens Detailed Info & Caller History */}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSelectedCallerHistoryPhone(isExpanded ? null : log.phone)
+                                }
+                                className="flex items-center gap-3 min-w-0 flex-1 text-left"
+                              >
+                                <div className="w-10 h-10 rounded-full bg-sky-500/15 text-sky-400 flex items-center justify-center font-bold text-xs shrink-0">
+                                  {log.contactName.slice(0, 2).toUpperCase()}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold truncate">
+                                      {log.contactName}
+                                    </span>
+                                    {log.username && (
+                                      <span className={`text-[11px] ${palette.accentText} truncate`}>
+                                        {log.username}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className={`flex items-center gap-1.5 text-xs ${palette.textSecondary} mt-0.5 tabular-nums`}>
+                                    {log.direction === 'outgoing' ? (
+                                      <PhoneOutgoing className="w-3.5 h-3.5 text-emerald-400" />
+                                    ) : (
+                                      <PhoneIncoming className="w-3.5 h-3.5 text-sky-400" />
+                                    )}
+                                    <span>{log.timestamp}</span>
+                                    {log.durationSeconds > 0 && (
+                                      <>
+                                        <span>·</span>
+                                        <span>{formatDuration(log.durationSeconds)}</span>
+                                      </>
+                                    )}
+                                    <span>·</span>
+                                    <span className="underline">Details</span>
+                                  </div>
+                                </div>
+                              </button>
 
+                              <button
+                                onClick={() => startCall(log.contactName, log.phone, log.id)}
+                                className="min-h-[44px] min-w-[44px] rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 flex items-center justify-center shrink-0"
+                              >
+                                <Phone className="w-4 h-4" />
+                              </button>
+                            </div>
+
+                            {/* Expanded Detailed Caller Info & History */}
+                            {isExpanded && (
+                              <div className={`p-3.5 rounded-xl ${palette.bgMain} border ${palette.border} space-y-2.5 text-xs`}>
+                                <div className="flex items-center justify-between">
+                                  <span className="font-semibold">
+                                    Caller History & E2EE Details ({log.phone})
+                                  </span>
+                                  <span className="text-[11px] text-emerald-400">
+                                    {log.codecUsed || 'Opus Low-Latency SFU'}
+                                  </span>
+                                </div>
+
+                                {log.dhEmojis && (
+                                  <div className={`flex items-center justify-between py-1.5 px-2.5 rounded-lg ${palette.bgCard} border ${palette.border}`}>
+                                    <span className={palette.textSecondary}>
+                                      Last Call DH Fingerprint
+                                    </span>
+                                    <span className="tracking-widest text-sm">
+                                      {log.dhEmojis.join(' ')}
+                                    </span>
+                                  </div>
+                                )}
+
+                                <div className="space-y-1.5 pt-1">
+                                  <div className={`text-[11px] font-medium ${palette.textSecondary}`}>
+                                    All Calls with {log.contactName} ({selectedCallerLogs.length})
+                                  </div>
+                                  {selectedCallerLogs.map((h) => (
+                                    <div
+                                      key={h.id}
+                                      className="flex items-center justify-between text-[11px] py-1 border-b border-slate-800/40 last:border-none tabular-nums"
+                                    >
+                                      <span className="flex items-center gap-1.5">
+                                        <Clock className="w-3 h-3 text-sky-400" />
+                                        <span>
+                                          {h.direction === 'outgoing' ? 'Outgoing' : 'Incoming'} ·{' '}
+                                          {h.timestamp}
+                                        </span>
+                                      </span>
+                                      <span>{formatDuration(h.durationSeconds)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Sub-Screen 2: Thumb-Zone Dialer (Username Search + Phone Keypad Call Execution) */}
+                {callsSubTab === 'dialer' && (
+                  <div className="max-w-sm mx-auto flex flex-col justify-end min-h-[64vh] space-y-3">
+                    {/* Live Username / Contact Matches in Dialer */}
+                    {dialerMatches.length > 0 && (
+                      <div className={`${palette.bgCard} border ${palette.border} rounded-2xl p-2.5 space-y-1.5`}>
+                        <div className={`text-[11px] px-1 font-medium ${palette.textSecondary}`}>
+                          Matching Telegram Contacts / Usernames
+                        </div>
+                        {dialerMatches.map((m) => (
+                          <div
+                            key={m.id}
+                            className={`p-2 rounded-xl ${palette.bgMain} flex items-center justify-between gap-2`}
+                          >
+                            <div className="min-w-0">
+                              <div className="text-xs font-semibold truncate">{m.name}</div>
+                              <div className={`text-[11px] ${palette.accentText} truncate`}>
+                                {m.username} · {m.phone}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => startCall(m.name, m.phone, m.id)}
+                              className="min-h-[36px] px-3 py-1 rounded-xl bg-emerald-500 text-slate-950 font-semibold text-xs shrink-0"
+                            >
+                              Call
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Thumb-Zone Keypad Card */}
+                    <div className={`p-4 rounded-2xl ${palette.bgCard} border ${palette.border} space-y-3.5`}>
+                      <div className={`flex items-center justify-between ${palette.bgMain} border ${palette.border} rounded-xl px-3.5 h-12`}>
+                        <AtSign className={`w-4 h-4 ${palette.accentText} mr-2 shrink-0`} />
+                        <input
+                          type="text"
+                          placeholder="Enter @username or +91 phone..."
+                          value={dialedInput}
+                          onChange={(e) => setDialedInput(e.target.value)}
+                          className="w-full bg-transparent text-base font-mono font-semibold focus:outline-none tabular-nums"
+                        />
                         <button
-                          onClick={() => startCall(log.contactName, log.phone, log.id)}
-                          className="min-h-[44px] min-w-[44px] rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 flex items-center justify-center shrink-0"
+                          onClick={() => setDialedInput((prev) => prev.slice(0, -1))}
+                          className="min-h-[40px] min-w-[40px] flex items-center justify-center opacity-70 hover:opacity-100"
                         >
-                          <Phone className="w-4 h-4" />
+                          <Delete className="w-5 h-5" />
                         </button>
                       </div>
-                    ))}
-                  </div>
-                )}
 
-                {/* Sub-Tab 2: Keypad Dialer */}
-                {callsSubTab === 'dialer' && (
-                  <div className="p-5 rounded-2xl bg-[#111b21] border border-slate-800 max-w-sm mx-auto space-y-4">
-                    <div className="flex items-center justify-between bg-[#0b141a] border border-slate-800 rounded-xl px-4 h-13">
-                      <input
-                        type="tel"
-                        value={dialedNumber}
-                        onChange={(e) => setDialedNumber(e.target.value)}
-                        className="w-full bg-transparent text-xl font-mono font-semibold text-white focus:outline-none tabular-nums"
-                      />
+                      <div className="grid grid-cols-3 gap-2">
+                        {DIAL_KEYS.map((digit) => (
+                          <button
+                            key={digit}
+                            onClick={() => {
+                              playTone(600, 0.05);
+                              setDialedInput((prev) => prev + digit);
+                            }}
+                            className={`h-12 rounded-2xl ${palette.bgMain} border ${palette.border} text-lg font-semibold active:scale-95 transition-transform tabular-nums`}
+                          >
+                            {digit}
+                          </button>
+                        ))}
+                      </div>
+
                       <button
-                        onClick={() => setDialedNumber((prev) => prev.slice(0, -1))}
-                        className="min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-400 hover:text-white"
+                        onClick={() => {
+                          const match = dialerMatches[0];
+                          if (match) {
+                            startCall(match.name, match.phone, match.id);
+                          } else {
+                            startCall(dialedInput, dialedInput, dialedInput);
+                          }
+                        }}
+                        className="w-full h-12 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm flex items-center justify-center gap-2"
                       >
-                        <Delete className="w-5 h-5" />
+                        <Phone className="w-5 h-5" />
+                        <span>Call via Telegram MTProto</span>
                       </button>
                     </div>
-
-                    <div className="grid grid-cols-3 gap-2.5">
-                      {DIAL_KEYS.map((digit) => (
-                        <button
-                          key={digit}
-                          onClick={() => {
-                            playTone(600, 0.05);
-                            setDialedNumber((prev) => prev + digit);
-                          }}
-                          className="h-13 rounded-2xl bg-[#0b141a] hover:bg-slate-800 border border-slate-800/80 text-lg font-semibold text-white active:scale-95 transition-transform tabular-nums"
-                        >
-                          {digit}
-                        </button>
-                      ))}
-                    </div>
-
-                    <button
-                      onClick={() => startCall(dialedNumber, dialedNumber, dialedNumber)}
-                      className="w-full h-13 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm flex items-center justify-center gap-2"
-                    >
-                      <Phone className="w-5 h-5" />
-                      <span>Call</span>
-                    </button>
                   </div>
                 )}
 
-                {/* Sub-Tab 3: Contacts */}
+                {/* Sub-Screen 3: Contacts (Synced Phone & Telegram Directory) */}
                 {callsSubTab === 'contacts' && (
                   <div className="space-y-3">
                     <div className="flex items-center justify-between gap-2">
                       <button
                         onClick={() => handleSyncContacts()}
-                        className="min-h-[40px] px-3.5 py-2 rounded-xl bg-[#111b21] border border-slate-800 text-xs font-medium text-slate-200 flex items-center gap-1.5"
+                        className={`min-h-[40px] px-3.5 py-2 rounded-xl ${palette.bgCard} border ${palette.border} text-xs font-medium flex items-center gap-1.5`}
                       >
                         <RefreshCw
                           className={`w-3.5 h-3.5 ${
                             syncingContacts ? 'animate-spin text-sky-400' : ''
                           }`}
                         />
-                        <span>{syncingContacts ? 'Syncing...' : 'Sync Telegram Contacts'}</span>
+                        <span>
+                          {syncingContacts ? 'Syncing...' : 'Sync Phone & Telegram Directory'}
+                        </span>
                       </button>
 
                       <button
@@ -1298,7 +1429,7 @@ export default function App() {
                     {showAddContact && (
                       <form
                         onSubmit={handleSyncContacts}
-                        className="p-3.5 rounded-2xl bg-[#111b21] border border-slate-800 space-y-2.5"
+                        className={`p-3.5 rounded-2xl ${palette.bgCard} border ${palette.border} space-y-2.5`}
                       >
                         <input
                           type="text"
@@ -1306,7 +1437,7 @@ export default function App() {
                           placeholder="Contact Name"
                           value={newContactName}
                           onChange={(e) => setNewContactName(e.target.value)}
-                          className="w-full h-10 px-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white"
+                          className={`w-full h-10 px-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs`}
                         />
                         <input
                           type="tel"
@@ -1314,7 +1445,7 @@ export default function App() {
                           placeholder="+91 98765 43210"
                           value={newContactPhone}
                           onChange={(e) => setNewContactPhone(e.target.value)}
-                          className="w-full h-10 px-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white font-mono"
+                          className={`w-full h-10 px-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs font-mono`}
                         />
                         <button
                           type="submit"
@@ -1325,25 +1456,30 @@ export default function App() {
                       </form>
                     )}
 
-                    <div className="bg-[#111b21] border border-slate-800 rounded-2xl divide-y divide-slate-800/80">
+                    <div className={`${palette.bgCard} border ${palette.border} rounded-2xl divide-y divide-slate-800/60`}>
                       {contacts.map((contact) => (
                         <div
                           key={contact.id}
                           className="p-3.5 flex items-center justify-between gap-3"
                         >
                           <div className="flex items-center gap-3 min-w-0">
-                            <div className="w-10 h-10 rounded-full bg-sky-500/15 text-sky-300 flex items-center justify-center font-bold text-xs shrink-0">
+                            <div className="w-10 h-10 rounded-full bg-sky-500/15 text-sky-400 flex items-center justify-center font-bold text-xs shrink-0">
                               {contact.name.slice(0, 2).toUpperCase()}
                             </div>
                             <div className="min-w-0">
-                              <div className="text-sm font-semibold text-white truncate">
-                                {contact.name}
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-semibold truncate">
+                                  {contact.name}
+                                </span>
+                                <span className={`text-[11px] ${palette.accentText}`}>
+                                  {contact.username}
+                                </span>
                               </div>
-                              <div className="text-xs text-slate-400 mt-0.5 tabular-nums truncate">
+                              <div className={`text-xs ${palette.textSecondary} mt-0.5 tabular-nums truncate`}>
                                 {contact.phone} ·{' '}
                                 <span
                                   className={
-                                    contact.online ? 'text-emerald-400' : 'text-slate-500'
+                                    contact.online ? 'text-emerald-400' : palette.textSecondary
                                   }
                                 >
                                   {contact.lastSeen}
@@ -1367,46 +1503,98 @@ export default function App() {
               </div>
             )}
 
-            {/* FOOTER TAB 2: VOICE ROOMS */}
+            {/* =================================================================== */}
+            {/* PRIMARY TAB 2: VOICE ROOMS (Search + Private Code Join + 3-Col Grid */}
+            {/* + Recent Rooms + Live Topic Rooms List + Floating Action Button)    */}
+            {/* =================================================================== */}
             {activeBottomTab === 'rooms' && (
               <div className="space-y-4">
-                {/* Horizontal Topic Filter Bar */}
-                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
-                  {TOPICS.map((topic) => (
-                    <button
-                      key={topic}
-                      onClick={() => setSelectedTopic(topic)}
-                      className={`min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
-                        selectedTopic === topic
-                          ? 'bg-sky-500 text-slate-950 font-semibold'
-                          : 'bg-[#111b21] text-slate-300 border border-slate-800'
-                      }`}
-                    >
-                      {topic}
-                    </button>
-                  ))}
+                {/* Search Bar + Private Code Join Button */}
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <Search className={`w-4 h-4 ${palette.textSecondary} absolute left-3.5 top-1/2 -translate-y-1/2`} />
+                    <input
+                      type="text"
+                      value={roomSearchQuery}
+                      onChange={(e) => setRoomSearchQuery(e.target.value)}
+                      placeholder="Search live topic rooms or paths..."
+                      className={`w-full h-11 pl-9 pr-3 ${palette.bgCard} border ${palette.border} rounded-xl text-xs focus:outline-none focus:border-sky-500`}
+                    />
+                  </div>
+
+                  <button
+                    onClick={() => setShowJoinByLinkModal(true)}
+                    className={`min-h-[44px] px-3.5 py-2 rounded-xl ${palette.bgCard} border ${palette.border} text-xs font-semibold flex items-center gap-1.5 shrink-0 whitespace-nowrap`}
+                  >
+                    <Link2 className={`w-4 h-4 ${palette.accentText}`} />
+                    <span>Private Code Join</span>
+                  </button>
                 </div>
 
-                {/* Voice Rooms List */}
+                {/* Recently Joined Rooms Strip */}
+                {recentlyJoinedRooms.length > 0 && (
+                  <div className={`p-3 rounded-2xl ${palette.bgCard} border ${palette.border}`}>
+                    <div className={`text-[11px] font-semibold ${palette.textSecondary} mb-2`}>
+                      Recently Joined Rooms
+                    </div>
+                    <div className="flex items-center gap-2 overflow-x-auto pb-0.5 no-scrollbar">
+                      {recentlyJoinedRooms.map((recentRoom) => (
+                        <button
+                          key={recentRoom.id}
+                          onClick={() => handleJoinRoom(recentRoom)}
+                          className={`min-h-[36px] px-3 py-1.5 rounded-xl ${palette.bgMain} border ${palette.border} flex items-center gap-2 shrink-0 text-left`}
+                        >
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                          <span className="text-xs font-semibold truncate max-w-[155px]">
+                            {recentRoom.title}
+                          </span>
+                          <span className={`text-[11px] ${palette.accentText} tabular-nums shrink-0`}>
+                            {recentRoom.listenerCount}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 3-Column Category Filtering Tag Grid */}
+                <div>
+                  <div className={`text-xs font-semibold ${palette.textSecondary} mb-2`}>
+                    Browse by Category (3-Column Tag Grid)
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {CATEGORY_GRID_TAGS.map((topic) => (
+                      <button
+                        key={topic}
+                        onClick={() => setSelectedTopic(topic)}
+                        className={`min-h-[40px] px-2.5 py-2 rounded-xl text-xs font-medium text-center truncate transition-colors ${
+                          selectedTopic === topic
+                            ? 'bg-sky-500 text-slate-950 font-semibold'
+                            : `${palette.bgCard} border ${palette.border}`
+                        }`}
+                      >
+                        {topic}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Live Topic Rooms List */}
                 <div className="space-y-3">
                   {visibleRooms.map((room) => (
                     <div
                       key={room.id}
-                      className="p-4 rounded-2xl bg-[#111b21] border border-slate-800 flex items-center justify-between gap-3"
+                      className={`p-4 rounded-2xl ${palette.bgCard} border ${palette.border} flex items-center justify-between gap-3`}
                     >
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 text-xs text-slate-400 mb-1 tabular-nums">
-                          <span className="text-sky-400 font-medium truncate">{room.topic}</span>
+                        <div className={`flex items-center gap-2 text-xs ${palette.textSecondary} mb-1 tabular-nums`}>
+                          <span className={`${palette.accentText} font-medium truncate`}>
+                            {room.topic}
+                          </span>
                           <span>·</span>
                           <span className="shrink-0">
                             {room.listenerCount.toLocaleString()} active
                           </span>
-                          {recentRoomIds.includes(room.id) && (
-                            <>
-                              <span>·</span>
-                              <span className="text-emerald-400 shrink-0">Joined Recently</span>
-                            </>
-                          )}
                           {room.visibility === 'private' && (
                             <>
                               <span>·</span>
@@ -1414,11 +1602,9 @@ export default function App() {
                             </>
                           )}
                         </div>
-                        <h2 className="text-base font-bold text-white leading-snug truncate">
-                          {room.title}
-                        </h2>
-                        <div className="text-xs text-slate-400 mt-0.5 truncate">
-                          Host: <span className="text-slate-300">{room.hostName}</span>
+                        <h2 className="text-base font-bold leading-snug truncate">{room.title}</h2>
+                        <div className={`text-xs ${palette.textSecondary} mt-0.5 truncate`}>
+                          Host: <span className="font-medium">{room.hostName}</span>
                         </div>
                       </div>
 
@@ -1431,7 +1617,7 @@ export default function App() {
                                 `${window.location.origin}/?room=${room.inviteCode}`
                               )
                             }
-                            className="min-h-[42px] px-3 py-2 rounded-xl bg-slate-800 text-xs font-medium text-sky-300 flex items-center gap-1"
+                            className={`min-h-[42px] px-3 py-2 rounded-xl border ${palette.border} text-xs font-medium ${palette.accentText} flex items-center gap-1`}
                           >
                             {copiedId === room.id ? (
                               <Check className="w-4 h-4 text-emerald-400" />
@@ -1452,89 +1638,171 @@ export default function App() {
                     </div>
                   ))}
                 </div>
+
+                {/* Floating Action Button (FAB) to Create Voice Room */}
+                <button
+                  onClick={() => setShowCreateRoomModal(true)}
+                  aria-label="Create Voice Room"
+                  className="fixed bottom-20 right-5 z-30 h-14 px-5 rounded-full bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs shadow-xl flex items-center gap-2 active:scale-95 transition-transform"
+                >
+                  <Plus className="w-5 h-5" />
+                  <span>Create Room</span>
+                </button>
               </div>
             )}
 
-            {/* FOOTER TAB 3: TELEGRAM PROFILE */}
+            {/* =================================================================== */}
+            {/* PRIMARY TAB 3: PROFILE (Synced Primary Telegram Account +           */}
+            {/* Custom TeleChats Profile Layer)                                     */}
+            {/* =================================================================== */}
             {activeBottomTab === 'profile' && (
               <div className="space-y-4">
-                {/* User Telegram Profile Card */}
-                <div className="p-5 rounded-2xl bg-[#111b21] border border-slate-800 space-y-5">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex items-center gap-4 min-w-0">
-                      <div className="w-16 h-16 rounded-full bg-sky-500/20 border border-sky-400/40 text-sky-300 flex items-center justify-center font-bold text-xl shrink-0">
-                        {currentUser.name.slice(0, 2).toUpperCase()}
-                      </div>
-                      <div className="min-w-0">
-                        <h2 className="text-lg font-bold text-white truncate">
-                          {currentUser.name}
-                        </h2>
-                        <p className="text-xs text-sky-400 font-medium truncate">
-                          {currentUser.username}
-                        </p>
-                        <p className="text-xs text-slate-400 font-mono mt-0.5">
-                          {currentUser.phone}
-                        </p>
-                      </div>
+                {/* 1. Primary Telegram Account Card (Synced via MTProto) */}
+                <div className={`p-5 rounded-2xl ${palette.bgCard} border ${palette.border} space-y-4`}>
+                  <div className="flex items-center justify-between">
+                    <span className={`text-xs font-semibold ${palette.accentText} flex items-center gap-1.5`}>
+                      <ShieldCheck className="w-4 h-4" />
+                      <span>Primary Telegram Account (MTProto Synced)</span>
+                    </span>
+                    {session && (
+                      <button
+                        onClick={() => {
+                          mtprotoEngine.logout();
+                          setSession(null);
+                        }}
+                        className="min-h-[34px] px-3 py-1 rounded-xl bg-rose-500/15 text-rose-400 border border-rose-500/30 text-xs font-medium flex items-center gap-1"
+                      >
+                        <LogOut className="w-3.5 h-3.5" />
+                        <span>Logout</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-4">
+                    <div className="w-15 h-15 rounded-full bg-sky-500/20 border border-sky-400/40 text-sky-400 flex items-center justify-center font-bold text-xl shrink-0">
+                      {currentUser.name.slice(0, 2).toUpperCase()}
+                    </div>
+                    <div className="min-w-0">
+                      <h2 className="text-lg font-bold truncate">{currentUser.name}</h2>
+                      <p className={`text-xs ${palette.accentText} font-medium truncate`}>
+                        {currentUser.username}
+                      </p>
+                      <p className={`text-xs ${palette.textSecondary} font-mono mt-0.5`}>
+                        {currentUser.phone} · DC{currentUser.dcId}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                    <button
+                      onClick={() => openAuthModal('existing_user')}
+                      className="min-h-[40px] px-3.5 py-2 rounded-xl bg-sky-500 text-slate-950 font-semibold text-xs flex items-center justify-center gap-1.5"
+                    >
+                      <User className="w-4 h-4" />
+                      <span>Login Existing Telegram User</span>
+                    </button>
+                    <button
+                      onClick={() => openAuthModal('new_user')}
+                      className={`min-h-[40px] px-3.5 py-2 rounded-xl border ${palette.border} font-semibold text-xs flex items-center justify-center gap-1.5`}
+                    >
+                      <UserPlus className={`w-4 h-4 ${palette.accentText}`} />
+                      <span>New User Sign Up (Call/SMS/Email)</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* 2. Custom TeleChats Profile Layer Card */}
+                <div className={`p-5 rounded-2xl ${palette.bgCard} border ${palette.border} space-y-4`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Layers className={`w-4 h-4 ${palette.accentText}`} />
+                      <h3 className="text-sm font-bold">Custom TeleChats Profile Layer</h3>
                     </div>
 
                     <button
                       onClick={() => {
-                        setEditName(currentUser.name);
-                        setEditUsername(currentUser.username);
-                        setEditBio(currentUser.bio || '');
-                        setIsEditingProfile((v) => !v);
+                        setEditTelechatsName(
+                          currentUser.telechatsDisplayName || currentUser.name
+                        );
+                        setEditTelechatsHandle(
+                          currentUser.telechatsHandle || '@user.telechats'
+                        );
+                        setEditTelechatsStatus(
+                          currentUser.telechatsStatus || 'Active on TeleChats Voice Rooms'
+                        );
+                        setEditTelechatsCategory(
+                          currentUser.telechatsCategoryTag || 'Education & Exams'
+                        );
+                        setIsEditingTelechatsLayer((v) => !v);
                       }}
-                      className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 shrink-0"
+                      className={`min-h-[36px] px-3 py-1.5 rounded-xl border ${palette.border} text-xs font-medium flex items-center gap-1.5`}
                     >
-                      <Edit3 className="w-3.5 h-3.5 text-sky-400" />
-                      <span>Edit</span>
+                      <Edit3 className={`w-3.5 h-3.5 ${palette.accentText}`} />
+                      <span>Customize Layer</span>
                     </button>
                   </div>
 
-                  {isEditingProfile && (
+                  {isEditingTelechatsLayer ? (
                     <form
-                      onSubmit={handleSaveProfileEdits}
-                      className="p-4 rounded-xl bg-[#0b141a] border border-slate-800 space-y-3"
+                      onSubmit={handleSaveTelechatsLayer}
+                      className={`p-4 rounded-xl ${palette.bgMain} border ${palette.border} space-y-3`}
                     >
                       <div>
-                        <label className="block text-xs text-slate-400 mb-1">
-                          Telegram Display Name
+                        <label className={`block text-xs ${palette.textSecondary} mb-1`}>
+                          TeleChats Stage Display Name
                         </label>
                         <input
                           type="text"
                           required
-                          value={editName}
-                          onChange={(e) => setEditName(e.target.value)}
-                          className="w-full h-10 px-3 rounded-xl bg-[#111b21] border border-slate-800 text-xs text-white"
+                          value={editTelechatsName}
+                          onChange={(e) => setEditTelechatsName(e.target.value)}
+                          className={`w-full h-10 px-3 rounded-xl ${palette.bgCard} border ${palette.border} text-xs`}
                         />
                       </div>
                       <div>
-                        <label className="block text-xs text-slate-400 mb-1">
-                          Telegram Username
+                        <label className={`block text-xs ${palette.textSecondary} mb-1`}>
+                          Custom TeleChats Handle
                         </label>
                         <input
                           type="text"
                           required
-                          value={editUsername}
-                          onChange={(e) => setEditUsername(e.target.value)}
-                          className="w-full h-10 px-3 rounded-xl bg-[#111b21] border border-slate-800 text-xs text-white"
+                          value={editTelechatsHandle}
+                          onChange={(e) => setEditTelechatsHandle(e.target.value)}
+                          className={`w-full h-10 px-3 rounded-xl ${palette.bgCard} border ${palette.border} text-xs`}
                         />
                       </div>
                       <div>
-                        <label className="block text-xs text-slate-400 mb-1">Bio</label>
+                        <label className={`block text-xs ${palette.textSecondary} mb-1`}>
+                          Community Status / Headline
+                        </label>
                         <input
                           type="text"
-                          value={editBio}
-                          onChange={(e) => setEditBio(e.target.value)}
-                          className="w-full h-10 px-3 rounded-xl bg-[#111b21] border border-slate-800 text-xs text-white"
+                          value={editTelechatsStatus}
+                          onChange={(e) => setEditTelechatsStatus(e.target.value)}
+                          className={`w-full h-10 px-3 rounded-xl ${palette.bgCard} border ${palette.border} text-xs`}
                         />
+                      </div>
+                      <div>
+                        <label className={`block text-xs ${palette.textSecondary} mb-1`}>
+                          Primary Topic Specialization
+                        </label>
+                        <select
+                          value={editTelechatsCategory}
+                          onChange={(e) => setEditTelechatsCategory(e.target.value)}
+                          className={`w-full h-10 px-3 rounded-xl ${palette.bgCard} border ${palette.border} text-xs`}
+                        >
+                          {CATEGORY_GRID_TAGS.filter((t) => t !== 'All').map((t) => (
+                            <option key={t} value={t}>
+                              {t}
+                            </option>
+                          ))}
+                        </select>
                       </div>
                       <div className="flex justify-end gap-2">
                         <button
                           type="button"
-                          onClick={() => setIsEditingProfile(false)}
-                          className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-slate-800 text-xs text-slate-300"
+                          onClick={() => setIsEditingTelechatsLayer(false)}
+                          className={`min-h-[38px] px-3.5 py-1.5 rounded-xl border ${palette.border} text-xs`}
                         >
                           Cancel
                         </button>
@@ -1542,108 +1810,57 @@ export default function App() {
                           type="submit"
                           className="min-h-[38px] px-4 py-1.5 rounded-xl bg-sky-500 text-slate-950 font-semibold text-xs"
                         >
-                          Save Telegram Profile
+                          Save TeleChats Layer
                         </button>
                       </div>
                     </form>
-                  )}
-
-                  {/* Telegram Account Details */}
-                  <div className="divide-y divide-slate-800/80 border-t border-slate-800 pt-2">
-                    <div className="py-3 flex items-center justify-between gap-2">
-                      <span className="text-xs text-slate-400">Bio</span>
-                      <span className="text-xs text-slate-200 text-right">
-                        {currentUser.bio || 'Available on TeleCall'}
-                      </span>
-                    </div>
-                    <div className="py-3 flex items-center justify-between gap-2">
-                      <span className="text-xs text-slate-400">Telegram Phone</span>
-                      <span className="text-xs text-slate-200 font-mono">
-                        {currentUser.phone}
-                      </span>
-                    </div>
-                    <div className="py-3 flex items-center justify-between gap-2">
-                      <span className="text-xs text-slate-400">Two-Step Verification (2FA)</span>
-                      <span className="text-xs text-emerald-400 font-medium flex items-center gap-1">
-                        <ShieldCheck className="w-3.5 h-3.5" />
-                        <span>{currentUser.twoFactorEnabled ? 'Enabled' : 'Standard OTP'}</span>
-                      </span>
-                    </div>
-                    {currentUser.email && (
-                      <div className="py-3 flex items-center justify-between gap-2">
-                        <span className="text-xs text-slate-400">Recovery / Login Email</span>
-                        <span className="text-xs text-slate-200">{currentUser.email}</span>
+                  ) : (
+                    <div className="divide-y divide-slate-800/60 text-xs">
+                      <div className="py-2.5 flex items-center justify-between gap-2">
+                        <span className={palette.textSecondary}>Stage Display Name</span>
+                        <span className="font-semibold">
+                          {currentUser.telechatsDisplayName || currentUser.name}
+                        </span>
                       </div>
-                    )}
-                  </div>
-
-                  {/* Switch or Login with Telegram Account Buttons */}
-                  <div className="pt-2 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <button
-                      onClick={() => openAuthModal('existing_user')}
-                      className="min-h-[42px] px-4 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs flex items-center justify-center gap-2"
-                    >
-                      <User className="w-4 h-4" />
-                      <span>Login Existing Telegram User</span>
-                    </button>
-                    <button
-                      onClick={() => openAuthModal('new_user')}
-                      className="min-h-[42px] px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs flex items-center justify-center gap-2"
-                    >
-                      <UserPlus className="w-4 h-4 text-sky-400" />
-                      <span>New User Sign Up (Call/SMS/Email)</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* User's Recently Joined Voice Rooms on Profile */}
-                {recentlyJoinedRooms.length > 0 && (
-                  <div className="p-4 rounded-2xl bg-[#111b21] border border-slate-800 space-y-3">
-                    <h3 className="text-xs font-semibold text-slate-400">
-                      Recently Joined Voice Rooms
-                    </h3>
-                    <div className="space-y-2">
-                      {recentlyJoinedRooms.map((rm) => (
-                        <div
-                          key={rm.id}
-                          className="p-3 rounded-xl bg-[#0b141a] border border-slate-800 flex items-center justify-between gap-3"
-                        >
-                          <div className="min-w-0">
-                            <div className="text-xs font-semibold text-white truncate">
-                              {rm.title}
-                            </div>
-                            <div className="text-[11px] text-sky-400">{rm.topic}</div>
-                          </div>
-                          <button
-                            onClick={() => {
-                              setActiveBottomTab('rooms');
-                              handleJoinRoom(rm);
-                            }}
-                            className="min-h-[36px] px-3 py-1.5 rounded-xl bg-sky-500 text-slate-950 font-semibold text-xs shrink-0"
-                          >
-                            Rejoin
-                          </button>
-                        </div>
-                      ))}
+                      <div className="py-2.5 flex items-center justify-between gap-2">
+                        <span className={palette.textSecondary}>TeleChats Handle</span>
+                        <span className={`${palette.accentText} font-medium`}>
+                          {currentUser.telechatsHandle || '@aarav.telechats'}
+                        </span>
+                      </div>
+                      <div className="py-2.5 flex items-center justify-between gap-2">
+                        <span className={palette.textSecondary}>Voice Status</span>
+                        <span className="text-right">
+                          {currentUser.telechatsStatus || 'Active on TeleChats Voice Rooms'}
+                        </span>
+                      </div>
+                      <div className="py-2.5 flex items-center justify-between gap-2">
+                        <span className={palette.textSecondary}>Primary Topic Badge</span>
+                        <span className="px-2.5 py-0.5 rounded-lg bg-sky-500/15 text-sky-400 font-medium">
+                          {currentUser.telechatsCategoryTag || 'Education & Exams'}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             )}
           </>
         )}
       </main>
 
-      {/* FLOATING BUTTONS ON CALLS PAGE (Call Logs | Dialer | Contacts) */}
+      {/* FLOATING SUB-VIEW NAVIGATION ON CALLS PAGE (Call Logs | Dialer | Contacts) */}
       {activeBottomTab === 'calls' && !activeJoinedRoom && (
         <div className="fixed bottom-19 left-0 right-0 z-30 flex justify-center px-4 pointer-events-none">
-          <div className="pointer-events-auto bg-[#111b21]/95 backdrop-blur-md border border-slate-700/80 shadow-xl rounded-2xl p-1 flex items-center gap-1">
+          <div
+            className={`pointer-events-auto ${palette.bgCard} border ${palette.border} shadow-xl rounded-2xl p-1 flex items-center gap-1`}
+          >
             <button
               onClick={() => setCallsSubTab('logs')}
               className={`min-h-[38px] px-4 py-1.5 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
                 callsSubTab === 'logs'
                   ? 'bg-sky-500 text-slate-950'
-                  : 'text-slate-300 hover:text-white'
+                  : `${palette.textSecondary} hover:opacity-100`
               }`}
             >
               Call Logs
@@ -1653,7 +1870,7 @@ export default function App() {
               className={`min-h-[38px] px-4 py-1.5 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
                 callsSubTab === 'dialer'
                   ? 'bg-sky-500 text-slate-950'
-                  : 'text-slate-300 hover:text-white'
+                  : `${palette.textSecondary} hover:opacity-100`
               }`}
             >
               Dialer
@@ -1663,7 +1880,7 @@ export default function App() {
               className={`min-h-[38px] px-4 py-1.5 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
                 callsSubTab === 'contacts'
                   ? 'bg-sky-500 text-slate-950'
-                  : 'text-slate-300 hover:text-white'
+                  : `${palette.textSecondary} hover:opacity-100`
               }`}
             >
               Contacts
@@ -1672,17 +1889,33 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL: Create Voice Room (Public or Private) */}
+      {/* HAMBURGER SETTINGS PAGE / DRAWER (Theme Engine & System Utilities) */}
+      <SettingsDrawer
+        isOpen={showSettingsDrawer}
+        onClose={() => setShowSettingsDrawer(false)}
+        activeTheme={activeTheme}
+        onSelectTheme={handleSelectTheme}
+        userId={currentUser.userId}
+        userName={currentUser.telechatsDisplayName || currentUser.name}
+        onClearLocalData={() => {
+          localStorage.removeItem('telecall_rooms_cache');
+          localStorage.removeItem(RECENT_ROOMS_STORAGE_KEY);
+          setRecentRoomIds([]);
+          setShowSettingsDrawer(false);
+        }}
+      />
+
+      {/* MODAL: Create Voice Room */}
       {showCreateRoomModal && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <form
             onSubmit={handleCreateRoom}
-            className="bg-[#111b21] border border-slate-800 rounded-2xl max-w-md w-full p-5 space-y-4"
+            className={`${palette.bgCard} border ${palette.border} rounded-2xl max-w-md w-full p-5 space-y-4`}
           >
-            <h3 className="text-lg font-bold text-white">Create Voice Room</h3>
+            <h3 className="text-lg font-bold">Create Voice Room</h3>
 
             <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">
+              <label className={`block text-xs font-medium ${palette.textSecondary} mb-1`}>
                 Voice Room Name
               </label>
               <input
@@ -1691,20 +1924,20 @@ export default function App() {
                 placeholder="e.g. Daily Exam Strategy & Doubt Solving"
                 value={newRoomTitle}
                 onChange={(e) => setNewRoomTitle(e.target.value)}
-                className="w-full h-11 px-3.5 rounded-xl bg-[#0b141a] border border-slate-800 text-sm text-white"
+                className={`w-full h-11 px-3.5 rounded-xl ${palette.bgMain} border ${palette.border} text-sm`}
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">
-                Room Topic
+              <label className={`block text-xs font-medium ${palette.textSecondary} mb-1`}>
+                Room Topic Category
               </label>
               <select
                 value={newRoomTopic}
                 onChange={(e) => setNewRoomTopic(e.target.value)}
-                className="w-full h-11 px-3.5 rounded-xl bg-[#0b141a] border border-slate-800 text-sm text-white"
+                className={`w-full h-11 px-3.5 rounded-xl ${palette.bgMain} border ${palette.border} text-sm`}
               >
-                {TOPICS.filter((t) => t !== 'All').map((t) => (
+                {CATEGORY_GRID_TAGS.filter((t) => t !== 'All').map((t) => (
                   <option key={t} value={t}>
                     {t}
                   </option>
@@ -1713,7 +1946,7 @@ export default function App() {
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">
+              <label className={`block text-xs font-medium ${palette.textSecondary} mb-1`}>
                 Room Privacy
               </label>
               <div className="grid grid-cols-2 gap-2">
@@ -1722,8 +1955,8 @@ export default function App() {
                   onClick={() => setNewRoomVisibility('public')}
                   className={`min-h-[42px] px-3 py-2 rounded-xl border text-xs font-medium flex items-center justify-center gap-1.5 ${
                     newRoomVisibility === 'public'
-                      ? 'bg-sky-500/20 border-sky-500 text-sky-300'
-                      : 'bg-[#0b141a] border-slate-800 text-slate-400'
+                      ? 'bg-sky-500/20 border-sky-500 text-sky-400'
+                      : `${palette.bgMain} ${palette.border}`
                   }`}
                 >
                   <Globe className="w-3.5 h-3.5" />
@@ -1734,25 +1967,25 @@ export default function App() {
                   onClick={() => setNewRoomVisibility('private')}
                   className={`min-h-[42px] px-3 py-2 rounded-xl border text-xs font-medium flex items-center justify-center gap-1.5 ${
                     newRoomVisibility === 'private'
-                      ? 'bg-sky-500/20 border-sky-500 text-sky-300'
-                      : 'bg-[#0b141a] border-slate-800 text-slate-400'
+                      ? 'bg-sky-500/20 border-sky-500 text-sky-400'
+                      : `${palette.bgMain} ${palette.border}`
                   }`}
                 >
                   <Lock className="w-3.5 h-3.5" />
-                  <span>Private (Invite Link)</span>
+                  <span>Private (Invite Code)</span>
                 </button>
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">
+              <label className={`block text-xs font-medium ${palette.textSecondary} mb-1`}>
                 Room Rules (One per line)
               </label>
               <textarea
                 rows={3}
                 value={newRoomRulesText}
                 onChange={(e) => setNewRoomRulesText(e.target.value)}
-                className="w-full p-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white"
+                className={`w-full p-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs`}
               />
             </div>
 
@@ -1760,7 +1993,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setShowCreateRoomModal(false)}
-                className="min-h-[42px] px-4 py-2 rounded-xl bg-slate-800 text-xs text-slate-300"
+                className={`min-h-[42px] px-4 py-2 rounded-xl border ${palette.border} text-xs`}
               >
                 Cancel
               </button>
@@ -1775,24 +2008,24 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL: Join Group via Invite Link / Code */}
+      {/* MODAL: Join Group via Private Code / Invite Link */}
       {showJoinByLinkModal && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <form
             onSubmit={handleJoinByInviteLink}
-            className="bg-[#111b21] border border-slate-800 rounded-2xl max-w-sm w-full p-5 space-y-4"
+            className={`${palette.bgCard} border ${palette.border} rounded-2xl max-w-sm w-full p-5 space-y-4`}
           >
-            <h3 className="text-base font-bold text-white">Join Voice Group</h3>
-            <p className="text-xs text-slate-400">
-              Paste the invite link or group code shared by the room host:
+            <h3 className="text-base font-bold">Private Code Join</h3>
+            <p className={`text-xs ${palette.textSecondary}`}>
+              Enter the private invite code or link shared by the room host:
             </p>
             <input
               type="text"
               required
-              placeholder="Paste invite link or code (e.g. upsc101)..."
+              placeholder="Paste code (e.g. upsc101 or tech2026)..."
               value={inviteLinkInput}
               onChange={(e) => setInviteLinkInput(e.target.value)}
-              className="w-full h-11 px-3.5 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white"
+              className={`w-full h-11 px-3.5 rounded-xl ${palette.bgMain} border ${palette.border} text-xs`}
             />
             {inviteError && <p className="text-xs text-rose-400">{inviteError}</p>}
             <div className="flex justify-end gap-2">
@@ -1802,7 +2035,7 @@ export default function App() {
                   setShowJoinByLinkModal(false);
                   setInviteError('');
                 }}
-                className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-800 text-xs text-slate-300"
+                className={`min-h-[40px] px-4 py-2 rounded-xl border ${palette.border} text-xs`}
               >
                 Cancel
               </button>
@@ -1810,7 +2043,7 @@ export default function App() {
                 type="submit"
                 className="min-h-[40px] px-4 py-2 rounded-xl bg-sky-500 text-slate-950 text-xs font-semibold"
               >
-                Join Group
+                Join Room
               </button>
             </div>
           </form>
@@ -1820,14 +2053,14 @@ export default function App() {
       {/* MODAL: Room Rules Popup */}
       {roomPreviewRules && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-[#111b21] border border-slate-800 rounded-2xl max-w-sm w-full p-5 space-y-4">
+          <div className={`${palette.bgCard} border ${palette.border} rounded-2xl max-w-sm w-full p-5 space-y-4`}>
             <div>
-              <div className="text-xs text-sky-400 font-medium">{roomPreviewRules.topic}</div>
-              <h3 className="text-base font-bold text-white mt-0.5">{roomPreviewRules.title}</h3>
+              <div className={`text-xs ${palette.accentText} font-medium`}>{roomPreviewRules.topic}</div>
+              <h3 className="text-base font-bold mt-0.5">{roomPreviewRules.title}</h3>
             </div>
-            <div className="space-y-1.5 p-3.5 rounded-xl bg-[#0b141a] border border-slate-800">
+            <div className={`space-y-1.5 p-3.5 rounded-xl ${palette.bgMain} border ${palette.border}`}>
               {roomPreviewRules.rules.map((r, i) => (
-                <div key={i} className="text-xs text-slate-300">
+                <div key={i} className="text-xs">
                   {i + 1}. {r}
                 </div>
               ))}
@@ -1835,7 +2068,7 @@ export default function App() {
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => setRoomPreviewRules(null)}
-                className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-800 text-xs text-slate-300"
+                className={`min-h-[40px] px-4 py-2 rounded-xl border ${palette.border} text-xs`}
               >
                 Close
               </button>
@@ -1847,24 +2080,24 @@ export default function App() {
       {/* MODAL: Edit Room Rules */}
       {showEditRulesModal && activeJoinedRoom && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-[#111b21] border border-slate-800 rounded-2xl max-w-sm w-full p-5 space-y-4">
-            <h3 className="text-base font-bold text-white">Edit Topic & Rules</h3>
+          <div className={`${palette.bgCard} border ${palette.border} rounded-2xl max-w-sm w-full p-5 space-y-4`}>
+            <h3 className="text-base font-bold">Edit Topic & Rules</h3>
             <input
               type="text"
               value={newRoomTopic}
               onChange={(e) => setNewRoomTopic(e.target.value)}
-              className="w-full h-10 px-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white"
+              className={`w-full h-10 px-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs`}
             />
             <textarea
               rows={4}
               value={newRoomRulesText}
               onChange={(e) => setNewRoomRulesText(e.target.value)}
-              className="w-full p-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white"
+              className={`w-full p-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs`}
             />
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => setShowEditRulesModal(false)}
-                className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-800 text-xs text-slate-300"
+                className={`min-h-[40px] px-4 py-2 rounded-xl border ${palette.border} text-xs`}
               >
                 Cancel
               </button>
@@ -1890,19 +2123,20 @@ export default function App() {
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <form
             onSubmit={authStep === 'phone' ? handleSendOtp : handleVerifyOtpOr2FA}
-            className="bg-[#111b21] border border-slate-800 rounded-2xl max-w-md w-full p-5 space-y-4"
+            className={`${palette.bgCard} border ${palette.border} rounded-2xl max-w-md w-full p-5 space-y-4`}
           >
             <div className="flex items-center justify-between">
-              <h3 className="text-base font-bold text-white">
+              <h3 className="text-base font-bold">
                 {authMode === 'existing_user'
                   ? 'Telegram Account Login'
                   : 'New Telegram User Sign Up'}
               </h3>
-              <span className="text-[11px] text-sky-400 font-medium">TeleCall MTProto</span>
+              <span className={`text-[11px] ${palette.accentText} font-medium`}>
+                TeleCall MTProto
+              </span>
             </div>
 
-            {/* Switch between Existing Telegram User vs New User */}
-            <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-[#0b141a] border border-slate-800">
+            <div className={`grid grid-cols-2 gap-1.5 p-1 rounded-xl ${palette.bgMain} border ${palette.border}`}>
               <button
                 type="button"
                 onClick={() => {
@@ -1914,7 +2148,7 @@ export default function App() {
                 className={`min-h-[36px] rounded-lg text-xs font-semibold transition-colors ${
                   authMode === 'existing_user'
                     ? 'bg-sky-500 text-slate-950'
-                    : 'text-slate-400 hover:text-white'
+                    : palette.textSecondary
                 }`}
               >
                 Existing Telegram User
@@ -1930,31 +2164,32 @@ export default function App() {
                 className={`min-h-[36px] rounded-lg text-xs font-semibold transition-colors ${
                   authMode === 'new_user'
                     ? 'bg-sky-500 text-slate-950'
-                    : 'text-slate-400 hover:text-white'
+                    : palette.textSecondary
                 }`}
               >
                 New User Sign Up
               </button>
             </div>
 
-            {/* STEP 1: Phone Number + Verification Delivery Method */}
             {authStep === 'phone' && (
               <div className="space-y-3">
                 {authMode === 'new_user' && (
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="block text-xs text-slate-400 mb-1">First Name</label>
+                      <label className={`block text-xs ${palette.textSecondary} mb-1`}>
+                        First Name
+                      </label>
                       <input
                         type="text"
                         required
                         placeholder="First name"
                         value={firstNameInput}
                         onChange={(e) => setFirstNameInput(e.target.value)}
-                        className="w-full h-10 px-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white"
+                        className={`w-full h-10 px-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs`}
                       />
                     </div>
                     <div>
-                      <label className="block text-xs text-slate-400 mb-1">
+                      <label className={`block text-xs ${palette.textSecondary} mb-1`}>
                         Last Name (Optional)
                       </label>
                       <input
@@ -1962,14 +2197,14 @@ export default function App() {
                         placeholder="Last name"
                         value={lastNameInput}
                         onChange={(e) => setLastNameInput(e.target.value)}
-                        className="w-full h-10 px-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white"
+                        className={`w-full h-10 px-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs`}
                       />
                     </div>
                   </div>
                 )}
 
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">
+                  <label className={`block text-xs ${palette.textSecondary} mb-1`}>
                     Telegram Phone Number
                   </label>
                   <input
@@ -1977,13 +2212,12 @@ export default function App() {
                     required
                     value={phoneInput}
                     onChange={(e) => setPhoneInput(e.target.value)}
-                    className="w-full h-10 px-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-white font-mono"
+                    className={`w-full h-10 px-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs font-mono`}
                   />
                 </div>
 
-                {/* Verification Method Selector (Telegram App, SMS, Phone Call, Email OTP) */}
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1.5">
+                  <label className={`block text-xs ${palette.textSecondary} mb-1.5`}>
                     Receive Verification Code Via
                   </label>
                   <div className="grid grid-cols-2 gap-2">
@@ -1993,8 +2227,8 @@ export default function App() {
                         onClick={() => setDeliveryMethod('telegram_app')}
                         className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 ${
                           deliveryMethod === 'telegram_app'
-                            ? 'bg-sky-500/20 border-sky-500 text-sky-300'
-                            : 'bg-[#0b141a] border-slate-800 text-slate-400'
+                            ? 'bg-sky-500/20 border-sky-500 text-sky-400'
+                            : `${palette.bgMain} ${palette.border}`
                         }`}
                       >
                         <MessageSquare className="w-3.5 h-3.5" />
@@ -2007,8 +2241,8 @@ export default function App() {
                       onClick={() => setDeliveryMethod('sms')}
                       className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 ${
                         deliveryMethod === 'sms'
-                          ? 'bg-sky-500/20 border-sky-500 text-sky-300'
-                          : 'bg-[#0b141a] border-slate-800 text-slate-400'
+                          ? 'bg-sky-500/20 border-sky-500 text-sky-400'
+                          : `${palette.bgMain} ${palette.border}`
                       }`}
                     >
                       <MessageSquare className="w-3.5 h-3.5" />
@@ -2020,8 +2254,8 @@ export default function App() {
                       onClick={() => setDeliveryMethod('phone_call')}
                       className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 ${
                         deliveryMethod === 'phone_call'
-                          ? 'bg-sky-500/20 border-sky-500 text-sky-300'
-                          : 'bg-[#0b141a] border-slate-800 text-slate-400'
+                          ? 'bg-sky-500/20 border-sky-500 text-sky-400'
+                          : `${palette.bgMain} ${palette.border}`
                       }`}
                     >
                       <PhoneCall className="w-3.5 h-3.5" />
@@ -2033,8 +2267,8 @@ export default function App() {
                       onClick={() => setDeliveryMethod('email')}
                       className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 ${
                         deliveryMethod === 'email'
-                          ? 'bg-sky-500/20 border-sky-500 text-sky-300'
-                          : 'bg-[#0b141a] border-slate-800 text-slate-400'
+                          ? 'bg-sky-500/20 border-sky-500 text-sky-400'
+                          : `${palette.bgMain} ${palette.border}`
                       }`}
                     >
                       <Mail className="w-3.5 h-3.5" />
@@ -2054,16 +2288,16 @@ export default function App() {
                       placeholder="you@example.com"
                       value={emailInput}
                       onChange={(e) => setEmailInput(e.target.value)}
-                      className="w-full h-10 px-3 rounded-xl bg-[#0b141a] border border-sky-500/60 text-xs text-white"
+                      className={`w-full h-10 px-3 rounded-xl ${palette.bgMain} border border-sky-500/60 text-xs`}
                     />
                   </div>
                 )}
 
                 {authMode === 'existing_user' && (
-                  <label className="flex items-center justify-between p-2.5 rounded-xl bg-[#0b141a] border border-slate-800 cursor-pointer">
+                  <label className={`flex items-center justify-between p-2.5 rounded-xl ${palette.bgMain} border ${palette.border} cursor-pointer`}>
                     <div className="flex items-center gap-2">
                       <ShieldCheck className="w-4 h-4 text-sky-400" />
-                      <span className="text-xs text-slate-300">
+                      <span className="text-xs">
                         My account has 2-Step Verification (2FA Password)
                       </span>
                     </div>
@@ -2078,10 +2312,9 @@ export default function App() {
               </div>
             )}
 
-            {/* STEP 2: OTP Verification (with instant switching between SMS, Call, or Email OTP) */}
             {authStep === 'otp' && (
               <div className="space-y-3">
-                <div className="p-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-slate-300">
+                <div className={`p-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs`}>
                   {deliveryMethod === 'telegram_app' &&
                     `Code sent to your Telegram app on ${phoneInput}.`}
                   {deliveryMethod === 'sms' && `SMS OTP sent to ${phoneInput}.`}
@@ -2100,11 +2333,10 @@ export default function App() {
                     required
                     value={otpInput}
                     onChange={(e) => setOtpInput(e.target.value)}
-                    className="w-full h-11 px-3 rounded-xl bg-[#0b141a] border border-sky-500 text-sm text-white font-mono tracking-widest"
+                    className={`w-full h-11 px-3 rounded-xl ${palette.bgMain} border border-sky-500 text-sm font-mono tracking-widest`}
                   />
                 </div>
 
-                {/* Resend / Switch Delivery Method like Telegram */}
                 <div className="flex flex-wrap items-center gap-2 pt-1">
                   <button
                     type="button"
@@ -2113,7 +2345,7 @@ export default function App() {
                   >
                     Get Code via SMS
                   </button>
-                  <span className="text-slate-600">·</span>
+                  <span>·</span>
                   <button
                     type="button"
                     onClick={(e) => handleSendOtp(e, 'phone_call')}
@@ -2121,7 +2353,7 @@ export default function App() {
                   >
                     Request Phone Call
                   </button>
-                  <span className="text-slate-600">·</span>
+                  <span>·</span>
                   <button
                     type="button"
                     onClick={() => {
@@ -2136,10 +2368,9 @@ export default function App() {
               </div>
             )}
 
-            {/* STEP 3: Telegram 2-Factor Authentication (Cloud Password) */}
             {authStep === '2fa' && (
               <div className="space-y-3">
-                <div className="p-3 rounded-xl bg-[#0b141a] border border-slate-800 text-xs text-slate-300 flex items-center gap-2">
+                <div className={`p-3 rounded-xl ${palette.bgMain} border ${palette.border} text-xs flex items-center gap-2`}>
                   <ShieldCheck className="w-4 h-4 text-sky-400 shrink-0" />
                   <span>
                     Two-Step Verification is enabled on this Telegram account. Enter your Cloud
@@ -2157,7 +2388,7 @@ export default function App() {
                     placeholder="Enter your 2FA password..."
                     value={twoFactorPassword}
                     onChange={(e) => setTwoFactorPassword(e.target.value)}
-                    className="w-full h-11 px-3 rounded-xl bg-[#0b141a] border border-sky-500 text-xs text-white"
+                    className={`w-full h-11 px-3 rounded-xl ${palette.bgMain} border border-sky-500 text-xs`}
                   />
                 </div>
               </div>
@@ -2170,7 +2401,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setAuthStep('phone')}
-                  className="min-h-[40px] px-3 py-2 rounded-xl bg-slate-800 text-xs text-slate-300"
+                  className={`min-h-[40px] px-3 py-2 rounded-xl border ${palette.border} text-xs`}
                 >
                   Back
                 </button>
@@ -2182,7 +2413,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setShowAuthModal(false)}
-                  className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-800 text-xs text-slate-300"
+                  className={`min-h-[40px] px-4 py-2 rounded-xl border ${palette.border} text-xs`}
                 >
                   Cancel
                 </button>
@@ -2209,8 +2440,8 @@ export default function App() {
 
       {/* FULL-SCREEN OVERLAY: 1-ON-1 E2EE VOICE CALL */}
       {activeCall && (
-        <div className="fixed inset-0 z-50 bg-[#0b141a] flex flex-col justify-between p-6">
-          <div className="max-w-sm w-full mx-auto flex items-center justify-between text-xs text-slate-400">
+        <div className={`fixed inset-0 z-50 ${palette.bgMain} flex flex-col justify-between p-6`}>
+          <div className={`max-w-sm w-full mx-auto flex items-center justify-between text-xs ${palette.textSecondary}`}>
             <div className="flex items-center gap-1.5 text-emerald-400 font-medium">
               <Lock className="w-3.5 h-3.5" />
               <span>End-to-End Encrypted</span>
@@ -2219,22 +2450,22 @@ export default function App() {
           </div>
 
           <div className="max-w-sm w-full mx-auto text-center space-y-5 my-auto">
-            <div className="w-24 h-24 rounded-full bg-sky-500/20 border-2 border-sky-400/50 text-sky-300 flex items-center justify-center font-bold text-3xl mx-auto">
+            <div className="w-24 h-24 rounded-full bg-sky-500/20 border-2 border-sky-400/50 text-sky-400 flex items-center justify-center font-bold text-3xl mx-auto">
               {activeCall.contactName.slice(0, 2).toUpperCase()}
             </div>
 
             <div>
-              <h2 className="text-2xl font-bold text-white">{activeCall.contactName}</h2>
-              <p className="text-xs text-slate-400 mt-1">{activeCall.phone}</p>
+              <h2 className="text-2xl font-bold">{activeCall.contactName}</h2>
+              <p className={`text-xs ${palette.textSecondary} mt-1`}>{activeCall.phone}</p>
             </div>
 
-            <div className="p-4 rounded-2xl bg-[#111b21] border border-slate-800 max-w-xs mx-auto">
+            <div className={`p-4 rounded-2xl ${palette.bgCard} border ${palette.border} max-w-xs mx-auto`}>
               <div className="text-2xl tracking-widest space-x-3 mb-1">
                 {activeCall.emojis.map((em, i) => (
                   <span key={i}>{em}</span>
                 ))}
               </div>
-              <p className="text-[11px] text-slate-400">
+              <p className={`text-[11px] ${palette.textSecondary}`}>
                 Matching emojis confirm End-to-End Encryption.
               </p>
             </div>
@@ -2247,8 +2478,8 @@ export default function App() {
               }
               className={`h-14 rounded-2xl flex flex-col items-center justify-center gap-1 text-xs font-medium ${
                 activeCall.isMuted
-                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                  : 'bg-[#111b21] text-slate-200 border border-slate-800'
+                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
+                  : `${palette.bgCard} border ${palette.border}`
               }`}
             >
               {activeCall.isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
@@ -2263,8 +2494,8 @@ export default function App() {
               }
               className={`h-14 rounded-2xl flex flex-col items-center justify-center gap-1 text-xs font-medium ${
                 activeCall.isSpeakerOn
-                  ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
-                  : 'bg-[#111b21] text-slate-200 border border-slate-800'
+                  ? 'bg-sky-500/20 text-sky-400 border border-sky-500/40'
+                  : `${palette.bgCard} border ${palette.border}`
               }`}
             >
               {activeCall.isSpeakerOn ? (
@@ -2289,12 +2520,14 @@ export default function App() {
         </div>
       )}
 
-      {/* HOMEPAGE FOOTER: STRICTLY 3 OPTIONS (Calls | Voice Rooms | Profile) */}
-      <nav className="fixed bottom-0 left-0 right-0 z-40 h-16 max-w-2xl mx-auto bg-[#111b21]/95 backdrop-blur-md border-t border-slate-800 grid grid-cols-3 items-center">
+      {/* 3 PRIMARY BOTTOM TABS: Calls | Voice Rooms | Profile */}
+      <nav
+        className={`fixed bottom-0 left-0 right-0 z-40 h-16 max-w-2xl mx-auto ${palette.bgCard} border-t ${palette.border} grid grid-cols-3 items-center`}
+      >
         <button
           onClick={() => setActiveBottomTab('calls')}
           className={`h-full flex flex-col items-center justify-center transition-colors ${
-            activeBottomTab === 'calls' ? 'text-sky-400' : 'text-slate-400 hover:text-slate-200'
+            activeBottomTab === 'calls' ? palette.accentText : palette.textSecondary
           }`}
         >
           <Phone className="w-5 h-5" />
@@ -2304,7 +2537,7 @@ export default function App() {
         <button
           onClick={() => setActiveBottomTab('rooms')}
           className={`h-full flex flex-col items-center justify-center transition-colors ${
-            activeBottomTab === 'rooms' ? 'text-sky-400' : 'text-slate-400 hover:text-slate-200'
+            activeBottomTab === 'rooms' ? palette.accentText : palette.textSecondary
           }`}
         >
           <Users className="w-5 h-5" />
@@ -2314,7 +2547,7 @@ export default function App() {
         <button
           onClick={() => setActiveBottomTab('profile')}
           className={`h-full flex flex-col items-center justify-center transition-colors ${
-            activeBottomTab === 'profile' ? 'text-sky-400' : 'text-slate-400 hover:text-slate-200'
+            activeBottomTab === 'profile' ? palette.accentText : palette.textSecondary
           }`}
         >
           <User className="w-5 h-5" />

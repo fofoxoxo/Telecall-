@@ -13,10 +13,48 @@ export interface MTProtoSessionData {
   bio?: string;
   email?: string;
   twoFactorEnabled?: boolean;
+  // Custom TeleChats Profile Layer on top of primary Telegram account
+  telechatsDisplayName?: string;
+  telechatsHandle?: string;
+  telechatsStatus?: string;
+  telechatsCategoryTag?: string;
   createdAt: number;
 }
 
 const STRING_SESSION_STORAGE_KEY = 'telecall_mtproto_string_session';
+const BACKEND_URL_STORAGE_KEY = 'telecall_backend_server_url';
+
+export function getApiBaseUrl(): string {
+  if (typeof window === 'undefined') return '';
+  const saved = localStorage.getItem(BACKEND_URL_STORAGE_KEY);
+  if (saved && saved.trim()) {
+    return saved.trim().replace(/\/$/, '');
+  }
+  // If running inside Capacitor Android APK from local file/https scheme or github.io, default to the live backend URL
+  const host = window.location.hostname;
+  if (host === 'localhost' && window.location.port !== '3000') {
+    return 'https://ais-pre-xfn5k5hyj4aiqlwlaul5tn-771261258696.asia-southeast1.run.app';
+  }
+  if (host.endsWith('github.io')) {
+    return 'https://ais-pre-xfn5k5hyj4aiqlwlaul5tn-771261258696.asia-southeast1.run.app';
+  }
+  return '';
+}
+
+export function setApiBaseUrl(url: string): void {
+  const clean = url.trim().replace(/\/$/, '');
+  if (!clean) {
+    localStorage.removeItem(BACKEND_URL_STORAGE_KEY);
+  } else {
+    localStorage.setItem(BACKEND_URL_STORAGE_KEY, clean);
+  }
+}
+
+export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  const base = getApiBaseUrl();
+  const fullUrl = path.startsWith('http') ? path : `${base}${path}`;
+  return fetch(fullUrl, init);
+}
 
 /**
  * StringSession implementation modeled after GramJS / Telethon StringSession.
@@ -86,8 +124,14 @@ export class ClientMTProtoEngine {
       return;
     }
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const base = getApiBaseUrl();
+    let wsUrl: string;
+    if (base && base.startsWith('http')) {
+      wsUrl = base.replace(/^http/, 'ws') + '/ws';
+    } else {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsUrl = `${protocol}//${window.location.host}/ws`;
+    }
 
     this.socket = new WebSocket(wsUrl);
 
@@ -185,7 +229,7 @@ export class ClientMTProtoEngine {
     const method: AuthDeliveryMethod =
       options?.deliveryMethod || (options?.isNewUser ? 'sms' : 'telegram_app');
     try {
-      const res = await fetch('/api/auth/send-code', {
+      const res = await apiFetch('/api/auth/send-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -226,7 +270,7 @@ export class ClientMTProtoEngine {
     error?: string;
   }> {
     try {
-      const res = await fetch('/api/auth/verify-code', {
+      const res = await apiFetch('/api/auth/verify-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
