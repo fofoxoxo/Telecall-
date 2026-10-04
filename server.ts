@@ -7,6 +7,10 @@ import crypto from 'crypto';
 import {
   createDcMediaBridgeRouter,
   createLocalSyncRouter,
+  createCommunityTopicRouter,
+  createSfuRouter,
+  handleSfuSignalingMessage,
+  communityTopicEngine,
   offlineQueueManager,
 } from './src/backend/index';
 
@@ -279,6 +283,8 @@ async function startServer() {
   app.use(express.json({ limit: '25mb' }));
   app.use('/api/dc-media', createDcMediaBridgeRouter());
   app.use('/api/local-sync', createLocalSyncRouter());
+  app.use('/api/community-topics', createCommunityTopicRouter());
+  app.use('/api/sfu', createSfuRouter());
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
@@ -311,6 +317,9 @@ async function startServer() {
     ws.on('message', (raw) => {
       try {
         const data = JSON.parse(raw.toString());
+        if (handleSfuSignalingMessage(ws, data, broadcast)) {
+          return;
+        }
         if (data.type === 'ping') {
           ws.send(JSON.stringify({ event: 'pong', payload: { ts: data.payload?.ts, serverTs: Date.now() } }));
         } else if (data.type === 'mtproto:init_connection') {
@@ -540,11 +549,26 @@ async function startServer() {
     };
 
     voiceRooms.set(roomId, newRoom);
+    const normalizedTopicPath = String(topic).startsWith('/')
+      ? String(topic)
+      : `/community/${String(topic).toLowerCase().replace(/[^a-z0-9]+/g, '-')}/${roomId}`;
+
+    communityTopicEngine
+      .createSupergroupChatroom({
+        title: newRoom.title,
+        topicPath: normalizedTopicPath,
+        visibility: newRoom.visibility,
+        rules: newRoom.rules,
+        hostId: newRoom.hostId,
+        hostName: newRoom.hostName,
+      })
+      .catch(() => {});
+
     offlineQueueManager
       .enqueueAction('CREATE_VOICE_ROOM', {
         roomId: newRoom.id,
         title: newRoom.title,
-        topicPath: `/voice/${String(topic).toLowerCase().replace(/[^a-z0-9]+/g, '-')}/${roomId}`,
+        topicPath: normalizedTopicPath,
         visibility: newRoom.visibility,
         rules: newRoom.rules,
         hostName: newRoom.hostName,

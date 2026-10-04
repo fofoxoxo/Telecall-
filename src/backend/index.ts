@@ -20,6 +20,33 @@ export type {
 export { ptsDiffSyncService, PtsDiffSyncService } from './ptsSyncService';
 export { offlineQueueManager, OfflineQueueManager } from './offlineQueue';
 export { createLocalSyncRouter } from './localReaderRouter';
+export {
+  communityTopicEngine,
+  CommunityTopicEngine,
+} from './topicHierarchyEngine';
+export type {
+  TopicNodeRecord,
+  CommunityChatroomRecord,
+} from './topicHierarchyEngine';
+export { createCommunityTopicRouter } from './communityTopicRouter';
+export {
+  mediasoupSfuEngine,
+  MediasoupSfuEngine,
+  OPUS_NETWORK_PROFILES,
+} from './sfuVoiceEngine';
+export type {
+  NetworkTier,
+  OpusCodecProfile,
+  SfuTransportInfo,
+  SfuProducerInfo,
+  SfuConsumerInfo,
+  SfuPeerSession,
+  SfuRoomRouter,
+} from './sfuVoiceEngine';
+export {
+  handleSfuSignalingMessage,
+  createSfuRouter,
+} from './sfuSignalingGateway';
 
 /**
  * Step 2.4: Clean Modular Express Bridge Router (`/api/dc-media/*`)
