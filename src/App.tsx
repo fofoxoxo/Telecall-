@@ -127,10 +127,132 @@ export default function App() {
   const [callsSubTab, setCallsSubTab] = useState<'logs' | 'contacts' | 'dialer'>('logs');
   const [dialedNumber, setDialedNumber] = useState('+91 ');
 
-  // Data States
-  const [rooms, setRooms] = useState<VoiceRoom[]>([]);
-  const [contacts, setContacts] = useState<SyncedContact[]>([]);
-  const [callLogs, setCallLogs] = useState<CallLogEntry[]>([]);
+  // Data States (Initialized with built-in defaults so deployed GitHub Pages WebView works immediately even without Node backend)
+  const [rooms, setRooms] = useState<VoiceRoom[]>(() => {
+    const saved = localStorage.getItem('telecall_rooms_cache');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        // ignore
+      }
+    }
+    return [
+      {
+        id: 'room-upsc-101',
+        title: 'All India UPSC & State PCS Late Night Discussion',
+        topic: 'Education & Exams',
+        visibility: 'public',
+        inviteCode: 'upsc101',
+        rules: [
+          'Raise hand to speak on stage; maximum 3 minutes per speaker.',
+          'Keep microphone muted when not speaking for clear audio.',
+          'Strictly stick to current affairs and syllabus topics.'
+        ],
+        hostId: 'tg-host-1',
+        hostName: 'Aarav Sharma',
+        createdAt: new Date().toISOString(),
+        maxCapacity: 2500,
+        lowBandwidthMode: true,
+        listenerCount: 1284,
+        participants: [
+          {
+            id: 'tg-host-1',
+            name: 'Aarav Sharma',
+            phone: '+91 98201 44512',
+            role: 'host',
+            isMuted: false,
+            handRaised: false,
+            isSpeaking: true,
+            joinedAt: new Date().toISOString()
+          },
+          {
+            id: 'tg-spk-2',
+            name: 'Priya Verma',
+            phone: '+91 98114 22089',
+            role: 'speaker',
+            isMuted: false,
+            handRaised: false,
+            isSpeaking: false,
+            joinedAt: new Date().toISOString()
+          }
+        ]
+      },
+      {
+        id: 'room-tech-talk',
+        title: 'Android App Makers & Startup Founders Lounge',
+        topic: 'Technology & Startups',
+        visibility: 'public',
+        inviteCode: 'tech2026',
+        rules: [
+          'Share practical product and coding experiences.',
+          'Hindi and English both welcome.'
+        ],
+        hostId: 'tg-host-2',
+        hostName: 'Kabir Mehta',
+        createdAt: new Date().toISOString(),
+        maxCapacity: 5000,
+        lowBandwidthMode: true,
+        listenerCount: 1042,
+        participants: [
+          {
+            id: 'tg-host-2',
+            name: 'Kabir Mehta',
+            phone: '+91 98765 11201',
+            role: 'host',
+            isMuted: false,
+            handRaised: false,
+            isSpeaking: true,
+            joinedAt: new Date().toISOString()
+          }
+        ]
+      }
+    ];
+  });
+  const [contacts, setContacts] = useState<SyncedContact[]>([
+    {
+      id: 'contact-1',
+      name: 'Aarav Sharma',
+      phone: '+91 98201 44512',
+      username: '@aarav_tg',
+      online: true,
+      lastSeen: 'Online'
+    },
+    {
+      id: 'contact-2',
+      name: 'Priya Verma',
+      phone: '+91 98114 22089',
+      username: '@priya_v',
+      online: true,
+      lastSeen: 'Online'
+    },
+    {
+      id: 'contact-3',
+      name: 'Kabir Mehta',
+      phone: '+91 98765 11201',
+      username: '@kabir_m',
+      online: true,
+      lastSeen: 'In Voice Room'
+    }
+  ]);
+  const [callLogs, setCallLogs] = useState<CallLogEntry[]>([
+    {
+      id: 'log-1',
+      contactName: 'Aarav Sharma',
+      phone: '+91 98201 44512',
+      direction: 'outgoing',
+      durationSeconds: 342,
+      timestamp: 'Today, 9:40 PM'
+    },
+    {
+      id: 'log-2',
+      contactName: 'Priya Verma',
+      phone: '+91 98114 22089',
+      direction: 'incoming',
+      durationSeconds: 128,
+      timestamp: 'Today, 7:15 PM'
+    }
+  ]);
 
   // Voice Rooms Header Search & Topic Filter
   const [roomSearchQuery, setRoomSearchQuery] = useState('');
@@ -368,45 +490,120 @@ export default function App() {
       .map((r) => r.trim())
       .filter(Boolean);
 
-    const res = await fetch('/api/rooms', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title: newRoomTitle,
+    try {
+      const res = await fetch('/api/rooms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: newRoomTitle,
+          topic: newRoomTopic,
+          visibility: newRoomVisibility,
+          rules,
+          hostId: currentUser.userId,
+          hostName: currentUser.name,
+          hostPhone: currentUser.phone
+        })
+      });
+      if (!res.ok) throw new Error('Static WebView fallback');
+      const data = await res.json();
+      if (data.ok && data.room) {
+        setRooms((prev) => {
+          const next = [data.room, ...prev.filter((r) => r.id !== data.room.id)];
+          localStorage.setItem('telecall_rooms_cache', JSON.stringify(next));
+          return next;
+        });
+        setShowCreateRoomModal(false);
+        setNewRoomTitle('');
+        setJoinedRoomId(data.room.id);
+        playTone(620, 0.14);
+      }
+    } catch {
+      const fallbackRoom: VoiceRoom = {
+        id: 'room-' + Date.now().toString(36),
+        title: newRoomTitle.trim(),
         topic: newRoomTopic,
         visibility: newRoomVisibility,
+        inviteCode: Math.random().toString(36).slice(2, 8),
         rules,
         hostId: currentUser.userId,
         hostName: currentUser.name,
-        hostPhone: currentUser.phone
-      })
-    });
-    const data = await res.json();
-    if (data.ok && data.room) {
-      setRooms((prev) => [data.room, ...prev.filter((r) => r.id !== data.room.id)]);
+        createdAt: new Date().toISOString(),
+        maxCapacity: 5000,
+        lowBandwidthMode: true,
+        listenerCount: 1,
+        participants: [
+          {
+            id: currentUser.userId,
+            name: currentUser.name,
+            phone: currentUser.phone,
+            role: 'host',
+            isMuted: false,
+            handRaised: false,
+            isSpeaking: true,
+            joinedAt: new Date().toISOString()
+          }
+        ]
+      };
+      setRooms((prev) => {
+        const next = [fallbackRoom, ...prev];
+        localStorage.setItem('telecall_rooms_cache', JSON.stringify(next));
+        return next;
+      });
       setShowCreateRoomModal(false);
       setNewRoomTitle('');
-      setJoinedRoomId(data.room.id);
+      setJoinedRoomId(fallbackRoom.id);
       playTone(620, 0.14);
     }
   };
 
   const handleJoinRoom = async (room: VoiceRoom) => {
     playTone(580, 0.12);
-    const res = await fetch(`/api/rooms/${room.id}/join`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userId: currentUser.userId,
-        name: currentUser.name,
-        phone: currentUser.phone
-      })
-    });
-    const data = await res.json();
-    if (data.ok && data.room) {
-      setRoomPreviewRules(null);
-      setJoinedRoomId(data.room.id);
+    try {
+      const res = await fetch(`/api/rooms/${room.id}/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: currentUser.userId,
+          name: currentUser.name,
+          phone: currentUser.phone
+        })
+      });
+      if (!res.ok) throw new Error('Static fallback');
+      const data = await res.json();
+      if (data.ok && data.room) {
+        setRoomPreviewRules(null);
+        setJoinedRoomId(data.room.id);
+        return;
+      }
+    } catch {
+      // Static WebView fallback
     }
+    setRooms((prev) =>
+      prev.map((r) => {
+        if (r.id !== room.id) return r;
+        const exists = r.participants.some((p) => p.id === currentUser.userId);
+        if (exists) return r;
+        return {
+          ...r,
+          listenerCount: r.listenerCount + 1,
+          participants: [
+            ...r.participants,
+            {
+              id: currentUser.userId,
+              name: currentUser.name,
+              phone: currentUser.phone,
+              role: r.hostId === currentUser.userId ? 'host' : 'listener',
+              isMuted: r.hostId !== currentUser.userId,
+              handRaised: false,
+              isSpeaking: false,
+              joinedAt: new Date().toISOString()
+            }
+          ]
+        };
+      })
+    );
+    setRoomPreviewRules(null);
+    setJoinedRoomId(room.id);
   };
 
   const handleJoinByInviteLink = async (e: React.FormEvent) => {
@@ -443,16 +640,40 @@ export default function App() {
     targetUserId?: string,
     extra?: Record<string, unknown>
   ) => {
-    await fetch(`/api/rooms/${roomId}/action`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userId: currentUser.userId,
-        action,
-        targetUserId,
-        ...extra
+    const targetId = targetUserId || currentUser.userId;
+    setRooms((prev) =>
+      prev.map((r) => {
+        if (r.id !== roomId) return r;
+        const updatedParticipants = r.participants.map((p) => {
+          if (p.id !== targetId) return p;
+          if (action === 'toggle-mute') return { ...p, isMuted: !p.isMuted, isSpeaking: p.isMuted };
+          if (action === 'toggle-hand') return { ...p, handRaised: !p.handRaised };
+          if (action === 'promote-speaker') return { ...p, role: 'speaker' as const, handRaised: false, isMuted: false };
+          if (action === 'move-to-listener') return { ...p, role: 'listener' as const, isMuted: true, isSpeaking: false };
+          return p;
+        });
+        return {
+          ...r,
+          topic: (extra?.newTopic as string) || r.topic,
+          rules: Array.isArray(extra?.newRules) ? (extra.newRules as string[]).filter(Boolean) : r.rules,
+          participants: action === 'leave' ? updatedParticipants.filter((p) => p.id !== currentUser.userId) : updatedParticipants
+        };
       })
-    });
+    );
+    try {
+      await fetch(`/api/rooms/${roomId}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: currentUser.userId,
+          action,
+          targetUserId,
+          ...extra
+        })
+      });
+    } catch {
+      // Handled optimistically for static GitHub Pages WebView
+    }
     if (action === 'leave') {
       playTone(320, 0.14);
       setJoinedRoomId(null);
