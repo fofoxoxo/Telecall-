@@ -26,7 +26,7 @@ export class ClientTdlibEngine {
   }
 
   public async ensureReadyForAuth(): Promise<string> {
-    ConnectionsManager.getInstance();
+    ConnectionsManager.getInstance().warmUpConnection().catch(() => {});
     return 'authorizationStateWaitPhoneNumber';
   }
 
@@ -205,6 +205,10 @@ export class ClientTdlibEngine {
     accessHash?: any;
   }) {
     return MessagesController.getInstance().startRealTelegramCall(target);
+  }
+
+  public async acceptRealCall(incomingCall?: { id: any; access_hash: any }) {
+    return MessagesController.getInstance().acceptRealTelegramCall(incomingCall);
   }
 
   public async discardRealCall(durationSeconds: number) {

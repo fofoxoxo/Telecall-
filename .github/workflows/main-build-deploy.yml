@@ -146,9 +146,9 @@ jobs:
             },
             "plugins": {
               "StatusBar": {
-                "overlaysWebView": true,
+                "overlaysWebView": false,
                 "style": "DARK",
-                "backgroundColor": "#00000000"
+                "backgroundColor": "#111b21"
               }
             }
           }
@@ -168,10 +168,119 @@ jobs:
           npx cap sync android
           chmod +x android/gradlew || true
 
-          # Inject Android Audio, Microphone, Contact & FCM Push Notification Permissions
+          # Inject Android Audio, Microphone, Camera, Contact & FCM Push Notification Permissions
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST" ] && ! grep -q "android.permission.RECORD_AUDIO" "$MANIFEST"; then
-            sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <uses-permission android:name="android.permission.BLUETOOTH" />\n    <uses-permission android:name="android.permission.READ_CONTACTS" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />' "$MANIFEST"
+            sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <uses-permission android:name="android.permission.BLUETOOTH" />\n    <uses-permission android:name="android.permission.READ_CONTACTS" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />' "$MANIFEST"
+          fi
+
+          # Configure MainActivity.java to unlock WebRTC Mic/Camera, set AudioManager.MODE_IN_COMMUNICATION, and color OS Status/Navigation Bars
+          MAIN_ACT=$(find android/app/src/main/java -name "MainActivity.java" | head -n 1)
+          if [ -n "$MAIN_ACT" ]; then
+            cat << 'EOF' > "$MAIN_ACT"
+package com.telecall.dev;
+
+import android.Manifest;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.graphics.Color;
+import android.media.AudioManager;
+import android.os.Build;
+import android.os.Bundle;
+import android.view.Window;
+import android.webkit.JavascriptInterface;
+import android.webkit.PermissionRequest;
+import android.webkit.WebChromeClient;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import com.getcapacitor.BridgeActivity;
+import java.util.ArrayList;
+import java.util.List;
+
+public class MainActivity extends BridgeActivity {
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        Window window = getWindow();
+        if (window != null) {
+            window.setStatusBarColor(Color.parseColor("#111b21"));
+            window.setNavigationBarColor(Color.parseColor("#0b141a"));
+        }
+
+        requestAppRuntimePermissions();
+
+        if (this.bridge != null && this.bridge.getWebView() != null) {
+            this.bridge.getWebView().getSettings().setMediaPlaybackRequiresUserGesture(false);
+            this.bridge.getWebView().addJavascriptInterface(new AndroidAudioBridge(this), "AndroidAudioBridge");
+            this.bridge.getWebView().setWebChromeClient(new WebChromeClient() {
+                @Override
+                public void onPermissionRequest(final PermissionRequest request) {
+                    runOnUiThread(() -> request.grant(request.getResources()));
+                }
+            });
+        }
+    }
+
+    private void requestAppRuntimePermissions() {
+        String[] perms = new String[] {
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.CAMERA,
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.MODIFY_AUDIO_SETTINGS
+        };
+        List<String> needed = new ArrayList<>();
+        for (String p : perms) {
+            if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {
+                needed.add(p);
+            }
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+                needed.add("android.permission.POST_NOTIFICATIONS");
+            }
+        }
+        if (!needed.isEmpty()) {
+            ActivityCompat.requestPermissions(this, needed.toArray(new String[0]), 1001);
+        }
+    }
+
+    public class AndroidAudioBridge {
+        private final Context ctx;
+        AndroidAudioBridge(Context c) { this.ctx = c; }
+
+        @JavascriptInterface
+        public void setCommunicationMode(boolean active) {
+            AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                am.setMode(active ? AudioManager.MODE_IN_COMMUNICATION : AudioManager.MODE_NORMAL);
+                am.setSpeakerphoneOn(active);
+            }
+        }
+
+        @JavascriptInterface
+        public void setSpeakerphoneOn(boolean on) {
+            AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                am.setSpeakerphoneOn(on);
+            }
+        }
+
+        @JavascriptInterface
+        public void setSystemBarsColor(final String statusBarHex, final String navBarHex, final boolean isLight) {
+            runOnUiThread(() -> {
+                try {
+                    Window w = getWindow();
+                    if (w != null) {
+                        w.setStatusBarColor(Color.parseColor(statusBarHex));
+                        w.setNavigationBarColor(Color.parseColor(navBarHex));
+                    }
+                } catch (Exception ignored) {}
+            });
+        }
+    }
+}
+EOF
           fi
 
           cd android

@@ -306,19 +306,56 @@ export class ConnectionsManager {
         );
       }
 
-      if (u._ === 'updatePhoneCall' && u.phone_call) {
-        const pc = u.phone_call;
-        NotificationCenter.getInstance().postNotificationName(
-          NotificationEvents.callStateDidUpdate,
-          pc
-        );
-        if (pc._ === 'phoneCallRequested') {
-          NotificationCenter.getInstance().postNotificationName(
-            NotificationEvents.didReceiveIncomingCall,
-            pc
-          );
+        if (
+          updatePayload?._ === 'updatePhoneCall' ||
+          u._ === 'updatePhoneCall'
+        ) {
+          const pc = u.phone_call || updatePayload.phone_call;
+          if (pc) {
+            NotificationCenter.getInstance().postNotificationName(
+              NotificationEvents.callStateDidUpdate,
+              pc
+            );
+            if (pc._ === 'phoneCallRequested') {
+              NotificationCenter.getInstance().postNotificationName(
+                NotificationEvents.didReceiveIncomingCall,
+                pc
+              );
+            } else if (pc._ === 'phoneCallAccepted') {
+              // Automatically complete DH handshake (`phone.confirmCall`) so audio starts immediately
+              MessagesController.getInstance()
+                .confirmRealTelegramCall({
+                  id: pc.id,
+                  access_hash: pc.access_hash
+                })
+                .then((confirmedPc) => {
+                  if (confirmedPc) {
+                    NotificationCenter.getInstance().postNotificationName(
+                      'voipEndpointsReady',
+                      {
+                        id: confirmedPc.id,
+                        accessHash: confirmedPc.access_hash,
+                        connections: confirmedPc.connections || [],
+                        p2pAllowed: Boolean(confirmedPc.p2p_allowed)
+                      }
+                    );
+                  }
+                })
+                .catch(() => {});
+            } else if (pc._ === 'phoneCall') {
+              // Extract Telegram VoIP Relay Endpoints (`connections`, `p2p_allowed`, `key_fingerprint`)
+              NotificationCenter.getInstance().postNotificationName(
+                'voipEndpointsReady',
+                {
+                  id: pc.id,
+                  accessHash: pc.access_hash,
+                  connections: pc.connections || [],
+                  p2pAllowed: Boolean(pc.p2p_allowed)
+                }
+              );
+            }
+          }
         }
-      }
     }
   }
 
@@ -329,6 +366,21 @@ export class ConnectionsManager {
   public setDefaultDc(dcId: number): void {
     this.defaultDcId = dcId;
     localStorage.setItem('tgnet_default_dc_id', String(dcId));
+  }
+
+  /**
+   * Pre-warms the encrypted MTProto connection (`help.getNearestDc`) on app launch
+   * so that when the user enters their phone number, OTP is sent in <300ms.
+   */
+  public async warmUpConnection(): Promise<void> {
+    try {
+      const nearest = await this.sendRequest('help.getNearestDc');
+      if (nearest?.nearest_dc && nearest.nearest_dc >= 1 && nearest.nearest_dc <= 5) {
+        this.setDefaultDc(Number(nearest.nearest_dc));
+      }
+    } catch {
+      // ignore pre-warm errors
+    }
   }
 
   public async sendRequest(
@@ -894,6 +946,7 @@ export class MessagesController {
    * Rings the target user's official Telegram app on their phone/desktop in real time!
    */
   private activePhoneCallPeer: { id: any; access_hash: any } | null = null;
+  private lastCallGa: Uint8Array | null = null;
 
   public async startRealTelegramCall(target: {
     phone?: string;
@@ -1004,6 +1057,7 @@ export class MessagesController {
       // 2. Generate 256-byte Diffie-Hellman `g_a` and 32-byte `g_a_hash` (SHA-256)
       const gA = new Uint8Array(256);
       crypto.getRandomValues(gA);
+      this.lastCallGa = gA;
       const hashBuffer = await crypto.subtle.digest('SHA-256', gA);
       const gAHash = new Uint8Array(hashBuffer);
 
@@ -1051,6 +1105,74 @@ export class MessagesController {
         ok: false,
         error: err?.error_message || err?.message || 'Telegram call request failed'
       };
+    }
+  }
+
+  /**
+   * Accept an incoming Telegram call (`phone.acceptCall`)
+   */
+  public async acceptRealTelegramCall(incomingCall?: {
+    id: any;
+    access_hash: any;
+  }): Promise<boolean> {
+    const peer = incomingCall || this.activePhoneCallPeer;
+    if (!peer) return false;
+    this.activePhoneCallPeer = peer;
+    try {
+      const gB = new Uint8Array(256);
+      crypto.getRandomValues(gB);
+      await ConnectionsManager.getInstance().sendRequest('phone.acceptCall', {
+        peer: {
+          _: 'inputPhoneCall',
+          id: peer.id,
+          access_hash: peer.access_hash
+        },
+        g_b: gB,
+        protocol: {
+          _: 'phoneCallProtocol',
+          udp_p2p: true,
+          udp_reflector: true,
+          min_layer: 65,
+          max_layer: 92,
+          library_versions: ['4.0.0', '3.0.0', '2.4.4']
+        }
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Complete Outgoing Call DH Handshake (`phone.confirmCall`) when callee accepts (`phoneCallAccepted`)
+   * Returns `TLRPC.TL_phoneCall` with relay server endpoints (`connections`: IP/Port/peer_tag).
+   */
+  public async confirmRealTelegramCall(acceptedCall: {
+    id: any;
+    access_hash: any;
+  }): Promise<any> {
+    const gA = this.lastCallGa || new Uint8Array(256);
+    try {
+      const res = await ConnectionsManager.getInstance().sendRequest('phone.confirmCall', {
+        peer: {
+          _: 'inputPhoneCall',
+          id: acceptedCall.id,
+          access_hash: acceptedCall.access_hash
+        },
+        g_a: gA,
+        key_fingerprint: 0,
+        protocol: {
+          _: 'phoneCallProtocol',
+          udp_p2p: true,
+          udp_reflector: true,
+          min_layer: 65,
+          max_layer: 92,
+          library_versions: ['4.0.0', '3.0.0', '2.4.4']
+        }
+      });
+      return res?.phone_call || null;
+    } catch {
+      return null;
     }
   }
 

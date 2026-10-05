@@ -356,6 +356,15 @@ async function startServer() {
           );
         } else if (data.type === 'webrtc:signal') {
           broadcast('webrtc:signal', data.payload);
+        } else if (
+          data.type === 'call:offer' ||
+          data.type === 'call:answer' ||
+          data.type === 'call:ice' ||
+          data.type === 'call:audio-chunk' ||
+          data.type === 'call:end' ||
+          data.type === 'call:hold'
+        ) {
+          broadcast(data.type, data.payload);
         }
       } catch {
         // Ignore malformed frames
@@ -489,6 +498,16 @@ async function startServer() {
       callLogs.unshift(newLog);
       broadcast('calllogs:updated', callLogs);
     }
+
+    broadcast('call:incoming', {
+      sessionId,
+      callerId: String(callerId || 'local'),
+      callerName: String(callerName || 'Caller'),
+      callerPhone: String(req.body.callerPhone || ''),
+      targetPhone: String(phone || ''),
+      targetName: String(contactName || ''),
+      emojis,
+    });
 
     res.json({
       ok: true,
@@ -701,6 +720,11 @@ async function startServer() {
     res.json({ ok: true, room });
   });
 
+  // Start listening on port 3000 immediately so dev server readiness checks succeed without delay
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`TeleCall server running on http://0.0.0.0:${PORT}`);
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -714,10 +738,6 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
-
-  server.listen(PORT, '0.0.0.0', () => {
-    console.log(`TeleCall server running on http://0.0.0.0:${PORT}`);
-  });
 }
 
 startServer();
