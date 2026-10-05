@@ -51,7 +51,7 @@ jobs:
           npm install --legacy-peer-deps --no-audit --no-fund
           npm install @capacitor/core@latest @capacitor/cli@latest @capacitor/android@latest @capacitor/status-bar@latest @capacitor/keyboard@latest @capacitor/push-notifications@latest --legacy-peer-deps --no-audit --no-fund
 
-      # 4. Requirement 2: Secret Injection into Runtime Environment & .env File
+      # 4. Secret Injection into Runtime Environment & .env File
       - name: 5. Inject GitHub Secrets into Runtime Environment & .env
         env:
           SECRET_TG_API_ID: ${{ secrets.TELEGRAM_API_ID }}
@@ -60,7 +60,7 @@ jobs:
         run: |
           REPO_OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
           REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
-          DEFAULT_WEBVIEW_URL="https://${REPO_OWNER}.github.io/${REPO_NAME}/"
+          DEFAULT_WEBVIEW_URL="https://$REPO_OWNER.github.io/$REPO_NAME/"
           FINAL_WEBVIEW_URL="${{ github.event.inputs.webview_url || '' }}"
           if [ -z "$FINAL_WEBVIEW_URL" ]; then
             FINAL_WEBVIEW_URL="$DEFAULT_WEBVIEW_URL"
@@ -68,22 +68,20 @@ jobs:
 
           echo "FINAL_WEBVIEW_URL=$FINAL_WEBVIEW_URL" >> $GITHUB_ENV
 
-          cat << EOF > .env
-          NODE_ENV=production
-          PORT=3000
-          APP_URL=${FINAL_WEBVIEW_URL}
-          TELEGRAM_API_ID=${SECRET_TG_API_ID}
-          TELEGRAM_API_HASH=${SECRET_TG_API_HASH}
-          VITE_TELEGRAM_API_ID=${SECRET_TG_API_ID}
-          VITE_TELEGRAM_API_HASH=${SECRET_TG_API_HASH}
-          FIREBASE_SERVICE_ACCOUNT_PATH=./firebase-service-account.json
-          EOF
+          echo "NODE_ENV=production" > .env
+          echo "PORT=3000" >> .env
+          echo "APP_URL=$FINAL_WEBVIEW_URL" >> .env
+          echo "TELEGRAM_API_ID=$SECRET_TG_API_ID" >> .env
+          echo "TELEGRAM_API_HASH=$SECRET_TG_API_HASH" >> .env
+          echo "VITE_TELEGRAM_API_ID=$SECRET_TG_API_ID" >> .env
+          echo "VITE_TELEGRAM_API_HASH=$SECRET_TG_API_HASH" >> .env
+          echo "FIREBASE_SERVICE_ACCOUNT_PATH=./firebase-service-account.json" >> .env
 
           if [ -n "$SECRET_FIREBASE_JSON" ]; then
             echo "$SECRET_FIREBASE_JSON" > firebase-service-account.json
           fi
 
-      # 5. Requirement 3: Express Backend Lint, Smoke Test & Standalone Compilation
+      # 5. Express Backend Lint, Smoke Test & Standalone Compilation
       - name: 6. Lint, Smoke-Test & Compile Express Backend Package
         env:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
@@ -99,8 +97,8 @@ jobs:
             cp firebase-service-account.json dist-backend/firebase-service-account.json
           fi
 
-      # 6. Requirement 5: Compile & Build Webview Client Assets Bundle + Deploy to gh-pages
-      - name: 7. Build Webview Client Bundle (with TDLib WASM Engine) & Publish to GitHub Pages
+      # 6. Compile & Build Webview Client Assets Bundle + Deploy to gh-pages
+      - name: 7. Build Webview Client Bundle & Publish to GitHub Pages
         env:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
@@ -125,172 +123,22 @@ jobs:
             cd ..
           fi
 
-      # 7. Requirement 4: Android Dev/Debug APK Gradle Build & Signing
+      # 7. Android Dev/Debug APK Gradle Build & Signing (Zero Bash Heredocs or Curly Braces)
       - name: 8. Configure Capacitor & Assemble Android Dev/Debug APK
         run: |
-          cat << EOF > capacitor.config.json
-          {
-            "appId": "com.telecall.dev",
-            "appName": "TeleCall",
-            "webDir": "dist",
-            "server": {
-              "cleartext": true,
-              "androidScheme": "https",
-              "allowNavigation": ["*"]
-            },
-            "android": {
-              "allowMixedContent": true,
-              "captureInput": true,
-              "webContentsDebuggingEnabled": true,
-              "backgroundColor": "#0b141a"
-            },
-            "plugins": {
-              "StatusBar": {
-                "overlaysWebView": false,
-                "style": "DARK",
-                "backgroundColor": "#111b21"
-              }
-            }
-          }
-          EOF
-
+          node scripts/configure-android.mjs pre-cap
           if [ ! -d "android/app" ]; then
             npx cap add android
           fi
-
-          # Copy user's google-services.json or googleservices.json into android/app/google-services.json for native FCM Push Notifications
-          if [ -f "google-services.json" ]; then
-            cp google-services.json android/app/google-services.json
-          elif [ -f "googleservices.json" ]; then
-            cp googleservices.json android/app/google-services.json
-          fi
-
           npx cap sync android
+          node scripts/configure-android.mjs post-cap
           chmod +x android/gradlew || true
-
-          # Inject Android Audio, Microphone, Camera, Contact & FCM Push Notification Permissions
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST" ] && ! grep -q "android.permission.RECORD_AUDIO" "$MANIFEST"; then
-            sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <uses-permission android:name="android.permission.BLUETOOTH" />\n    <uses-permission android:name="android.permission.READ_CONTACTS" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />' "$MANIFEST"
-          fi
-
-          # Configure MainActivity.java to unlock WebRTC Mic/Camera, set AudioManager.MODE_IN_COMMUNICATION, and color OS Status/Navigation Bars
-          MAIN_ACT=$(find android/app/src/main/java -name "MainActivity.java" | head -n 1)
-          if [ -n "$MAIN_ACT" ]; then
-            cat << 'EOF' > "$MAIN_ACT"
-            package com.telecall.dev;
-
-            import android.Manifest;
-            import android.content.Context;
-            import android.content.pm.PackageManager;
-            import android.graphics.Color;
-            import android.media.AudioManager;
-            import android.os.Build;
-            import android.os.Bundle;
-            import android.view.Window;
-            import android.webkit.JavascriptInterface;
-            import android.webkit.PermissionRequest;
-            import android.webkit.WebChromeClient;
-            import androidx.core.app.ActivityCompat;
-            import androidx.core.content.ContextCompat;
-            import com.getcapacitor.BridgeActivity;
-            import java.util.ArrayList;
-            import java.util.List;
-
-            public class MainActivity extends BridgeActivity {
-                @Override
-                public void onCreate(Bundle savedInstanceState) {
-                    super.onCreate(savedInstanceState);
-
-                    Window window = getWindow();
-                    if (window != null) {
-                        window.setStatusBarColor(Color.parseColor("#111b21"));
-                        window.setNavigationBarColor(Color.parseColor("#0b141a"));
-                    }
-
-                    requestAppRuntimePermissions();
-
-                    if (this.bridge != null && this.bridge.getWebView() != null) {
-                        this.bridge.getWebView().getSettings().setMediaPlaybackRequiresUserGesture(false);
-                        this.bridge.getWebView().addJavascriptInterface(new AndroidAudioBridge(this), "AndroidAudioBridge");
-                        this.bridge.getWebView().setWebChromeClient(new WebChromeClient() {
-                            @Override
-                            public void onPermissionRequest(final PermissionRequest request) {
-                                runOnUiThread(() -> request.grant(request.getResources()));
-                            }
-                        });
-                    }
-                }
-
-                private void requestAppRuntimePermissions() {
-                    String[] perms = new String[] {
-                        Manifest.permission.RECORD_AUDIO,
-                        Manifest.permission.CAMERA,
-                        Manifest.permission.READ_CONTACTS,
-                        Manifest.permission.MODIFY_AUDIO_SETTINGS
-                    };
-                    List<String> needed = new ArrayList<>();
-                    for (String p : perms) {
-                        if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {
-                            needed.add(p);
-                        }
-                    }
-                    if (Build.VERSION.SDK_INT >= 33) {
-                        if (ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
-                            needed.add("android.permission.POST_NOTIFICATIONS");
-                        }
-                    }
-                    if (!needed.isEmpty()) {
-                        ActivityCompat.requestPermissions(this, needed.toArray(new String[0]), 1001);
-                    }
-                }
-
-                public class AndroidAudioBridge {
-                    private final Context ctx;
-                    AndroidAudioBridge(Context c) { this.ctx = c; }
-
-                    @JavascriptInterface
-                    public void setCommunicationMode(boolean active) {
-                        AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
-                        if (am != null) {
-                            am.setMode(active ? AudioManager.MODE_IN_COMMUNICATION : AudioManager.MODE_NORMAL);
-                            am.setSpeakerphoneOn(active);
-                        }
-                    }
-
-                    @JavascriptInterface
-                    public void setSpeakerphoneOn(boolean on) {
-                        AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
-                        if (am != null) {
-                            am.setSpeakerphoneOn(on);
-                        }
-                    }
-
-                    @JavascriptInterface
-                    public void setSystemBarsColor(final String statusBarHex, final String navBarHex, final boolean isLight) {
-                        runOnUiThread(() -> {
-                            try {
-                                Window w = getWindow();
-                                if (w != null) {
-                                    w.setStatusBarColor(Color.parseColor(statusBarHex));
-                                    w.setNavigationBarColor(Color.parseColor(navBarHex));
-                                }
-                            } catch (Exception ignored) {}
-                        });
-                    }
-                }
-            }
-            EOF
-          fi
-
           cd android
           ./gradlew assembleDebug --no-daemon --stacktrace
           cd ..
+          node scripts/configure-android.mjs copy-apk
 
-          mkdir -p artifacts/apk
-          find android/app/build/outputs/apk/debug -name "*.apk" -exec cp {} artifacts/apk/telecall-dev-debug.apk \;
-
-      # 8. Requirement 6: Unified Artifact Uploads (Backend Package + Android Dev APK + Webview Bundle)
+      # 8. Unified Artifact Uploads (Backend Package + Android Dev APK + Webview Bundle)
       - name: 9. Upload Artifact 1 — Express Backend Distribution Package
         uses: actions/upload-artifact@v4
         with:
