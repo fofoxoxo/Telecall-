@@ -97,47 +97,55 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        Window window = getWindow();
-        if (window != null) {
-            window.setStatusBarColor(Color.parseColor("#111b21"));
-            window.setNavigationBarColor(Color.parseColor("#0b141a"));
-        }
+        try {
+            Window window = getWindow();
+            if (window != null) {
+                window.setStatusBarColor(Color.parseColor("#111b21"));
+                window.setNavigationBarColor(Color.parseColor("#0b141a"));
+            }
+        } catch (Exception ignored) {}
 
-        requestAppRuntimePermissions();
-
-        if (this.bridge != null && this.bridge.getWebView() != null) {
-            this.bridge.getWebView().getSettings().setMediaPlaybackRequiresUserGesture(false);
-            this.bridge.getWebView().addJavascriptInterface(new AndroidAudioBridge(this), "AndroidAudioBridge");
-            this.bridge.getWebView().setWebChromeClient(new WebChromeClient() {
-                @Override
-                public void onPermissionRequest(final PermissionRequest request) {
-                    runOnUiThread(() -> request.grant(request.getResources()));
-                }
-            });
-        }
+        try {
+            if (this.bridge != null && this.bridge.getWebView() != null) {
+                this.bridge.getWebView().getSettings().setMediaPlaybackRequiresUserGesture(false);
+                this.bridge.getWebView().addJavascriptInterface(new AndroidAudioBridge(this), "AndroidAudioBridge");
+                this.bridge.getWebView().setWebChromeClient(new WebChromeClient() {
+                    @Override
+                    public void onPermissionRequest(final PermissionRequest request) {
+                        runOnUiThread(() -> {
+                            try {
+                                request.grant(request.getResources());
+                            } catch (Exception ignored) {}
+                        });
+                    }
+                });
+            }
+        } catch (Exception ignored) {}
     }
 
     private void requestAppRuntimePermissions() {
-        String[] perms = new String[] {
-            Manifest.permission.RECORD_AUDIO,
-            Manifest.permission.CAMERA,
-            Manifest.permission.READ_CONTACTS,
-            Manifest.permission.MODIFY_AUDIO_SETTINGS
-        };
-        List<String> needed = new ArrayList<>();
-        for (String p : perms) {
-            if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {
-                needed.add(p);
+        try {
+            String[] perms = new String[] {
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.CAMERA,
+                Manifest.permission.READ_CONTACTS,
+                Manifest.permission.MODIFY_AUDIO_SETTINGS
+            };
+            List<String> needed = new ArrayList<>();
+            for (String p : perms) {
+                if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {
+                    needed.add(p);
+                }
             }
-        }
-        if (Build.VERSION.SDK_INT >= 33) {
-            if (ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
-                needed.add("android.permission.POST_NOTIFICATIONS");
+            if (Build.VERSION.SDK_INT >= 33) {
+                if (ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+                    needed.add("android.permission.POST_NOTIFICATIONS");
+                }
             }
-        }
-        if (!needed.isEmpty()) {
-            ActivityCompat.requestPermissions(this, needed.toArray(new String[0]), 1001);
-        }
+            if (!needed.isEmpty()) {
+                ActivityCompat.requestPermissions(this, needed.toArray(new String[0]), 1001);
+            }
+        } catch (Exception ignored) {}
     }
 
     public class AndroidAudioBridge {
@@ -145,20 +153,29 @@ public class MainActivity extends BridgeActivity {
         AndroidAudioBridge(Context c) { this.ctx = c; }
 
         @JavascriptInterface
+        public void requestDevicePermissions() {
+            runOnUiThread(() -> requestAppRuntimePermissions());
+        }
+
+        @JavascriptInterface
         public void setCommunicationMode(boolean active) {
-            AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
-            if (am != null) {
-                am.setMode(active ? AudioManager.MODE_IN_COMMUNICATION : AudioManager.MODE_NORMAL);
-                am.setSpeakerphoneOn(active);
-            }
+            try {
+                AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+                if (am != null) {
+                    am.setMode(active ? AudioManager.MODE_IN_COMMUNICATION : AudioManager.MODE_NORMAL);
+                    am.setSpeakerphoneOn(active);
+                }
+            } catch (Exception ignored) {}
         }
 
         @JavascriptInterface
         public void setSpeakerphoneOn(boolean on) {
-            AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
-            if (am != null) {
-                am.setSpeakerphoneOn(on);
-            }
+            try {
+                AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+                if (am != null) {
+                    am.setSpeakerphoneOn(on);
+                }
+            } catch (Exception ignored) {}
         }
 
         @JavascriptInterface

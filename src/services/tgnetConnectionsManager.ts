@@ -117,10 +117,27 @@ export class LocalCache4Database {
     try {
       const raw = localStorage.getItem(CACHE4_DB_STORAGE_KEY);
       if (raw) {
-        return JSON.parse(raw);
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          return {
+            users: parsed.users || {},
+            chats: parsed.chats || {},
+            dialogs: Array.isArray(parsed.dialogs) ? parsed.dialogs : [],
+            contacts: Array.isArray(parsed.contacts) ? parsed.contacts : [],
+            callLogs: Array.isArray(parsed.callLogs) ? parsed.callLogs : [],
+            voiceRooms: Array.isArray(parsed.voiceRooms) ? parsed.voiceRooms : [],
+            lastPts: Number(parsed.lastPts || 0),
+            lastUpdatedAt: Number(parsed.lastUpdatedAt || 0)
+          };
+        }
       }
     } catch {
-      // ignore
+      // Clear corrupted storage if any
+      try {
+        localStorage.removeItem(CACHE4_DB_STORAGE_KEY);
+      } catch {
+        // ignore
+      }
     }
     return {
       users: {},
@@ -137,13 +154,16 @@ export class LocalCache4Database {
   public saveToDisk(): void {
     try {
       this.state.lastUpdatedAt = Date.now();
-      localStorage.setItem(CACHE4_DB_STORAGE_KEY, JSON.stringify(this.state));
+      const safeJson = JSON.stringify(this.state, (_k, v) =>
+        typeof v === 'bigint' ? v.toString() : v
+      );
+      localStorage.setItem(CACHE4_DB_STORAGE_KEY, safeJson);
       NotificationCenter.getInstance().postNotificationName(
         NotificationEvents.cache4DbDidSync,
         this.state
       );
     } catch {
-      // ignore quota errors
+      // ignore quota or serialization errors
     }
   }
 
@@ -152,34 +172,51 @@ export class LocalCache4Database {
   }
 
   public putUsers(users: any[]): void {
-    for (const u of users) {
+    if (!Array.isArray(users)) return;
+    for (const u of users.slice(0, 150)) {
       if (u?.id) {
-        this.state.users[String(u.id)] = u;
+        this.state.users[String(u.id)] = {
+          id: String(u.id),
+          access_hash: u.access_hash ? String(u.access_hash) : undefined,
+          first_name: u.first_name || '',
+          last_name: u.last_name || '',
+          username: u.username || '',
+          phone: u.phone || '',
+          status: u.status?._ ? { _: u.status._ } : undefined
+        };
       }
     }
   }
 
   public putChats(chats: any[]): void {
-    for (const c of chats) {
+    if (!Array.isArray(chats)) return;
+    for (const c of chats.slice(0, 80)) {
       if (c?.id) {
-        this.state.chats[String(c.id)] = c;
+        this.state.chats[String(c.id)] = {
+          id: String(c.id),
+          access_hash: c.access_hash ? String(c.access_hash) : undefined,
+          title: c.title || '',
+          username: c.username || '',
+          participants_count: Number(c.participants_count || 0),
+          call_active: Boolean(c.call_active)
+        };
       }
     }
   }
 
   public setContacts(contacts: any[]): void {
-    this.state.contacts = contacts;
+    this.state.contacts = Array.isArray(contacts) ? contacts.slice(0, 150) : [];
     this.saveToDisk();
   }
 
   public setDialogsAndVoiceRooms(dialogs: any[], voiceRooms: any[]): void {
-    this.state.dialogs = dialogs;
-    this.state.voiceRooms = voiceRooms;
+    this.state.dialogs = Array.isArray(dialogs) ? dialogs.slice(0, 40) : [];
+    this.state.voiceRooms = Array.isArray(voiceRooms) ? voiceRooms.slice(0, 30) : [];
     this.saveToDisk();
   }
 
   public setCallLogs(callLogs: any[]): void {
-    this.state.callLogs = callLogs;
+    this.state.callLogs = Array.isArray(callLogs) ? callLogs.slice(0, 50) : [];
     this.saveToDisk();
   }
 
@@ -391,11 +428,19 @@ export class ConnectionsManager {
     const engine = this.ensureEngine();
     const targetDc = options.dcId || this.defaultDcId;
 
+    const callWithTimeout = (dc: number) =>
+      Promise.race([
+        engine.call(method, params, {
+          dcId: dc,
+          syncAuth: options.syncAuth
+        }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('REQUEST_TIMEOUT')), 12000)
+        )
+      ]);
+
     try {
-      const result = await engine.call(method, params, {
-        dcId: targetDc,
-        syncAuth: options.syncAuth
-      });
+      const result = await callWithTimeout(targetDc);
       NotificationCenter.getInstance().postNotificationName(
         NotificationEvents.connectionStateDidChange,
         { connected: true, dcId: targetDc }
@@ -409,10 +454,7 @@ export class ConnectionsManager {
         const newDcId = Number(parts[1]);
         if (newDcId && newDcId >= 1 && newDcId <= 5) {
           this.setDefaultDc(newDcId);
-          return engine.call(method, params, {
-            dcId: newDcId,
-            syncAuth: options.syncAuth
-          });
+          return callWithTimeout(newDcId);
         }
       }
 
@@ -632,8 +674,6 @@ export class MessagesController {
           NotificationEvents.userInfoDidLoad,
           checkRes.user
         );
-        // Trigger full background sync of Contacts, Dialogs, Voice Rooms, and Call History
-        this.syncAllTelegramDataInBackground().catch(() => {});
         return { ok: true, user: checkRes.user };
       }
 
@@ -653,12 +693,17 @@ export class MessagesController {
         };
       }
 
+      const signedInUser = signInRes?.user || {
+        id: Date.now(),
+        first_name: 'Telegram User',
+        phone: cleanPhone.replace(/^\+/, '')
+      };
+
       NotificationCenter.getInstance().postNotificationName(
         NotificationEvents.userInfoDidLoad,
-        signInRes.user
+        signedInUser
       );
-      this.syncAllTelegramDataInBackground().catch(() => {});
-      return { ok: true, user: signInRes.user };
+      return { ok: true, user: signedInUser };
     } catch (err: any) {
       const code = err?.error_message || err?.message || '';
 
@@ -745,12 +790,19 @@ export class MessagesController {
    * 2. `messages.getDialogs` -> Historical Chats, Supergroups, Channels & Active Voice Rooms (`call_active`)
    * 3. `messages.search` (`inputMessagesFilterPhoneCalls`) -> Real Telegram Call Logs History
    */
+  private isSyncingInBackground = false;
+
   public async syncAllTelegramDataInBackground(): Promise<{
     contactsCount: number;
     dialogsCount: number;
     voiceRoomsCount: number;
     callLogsCount: number;
   }> {
+    if (this.isSyncingInBackground) {
+      return { contactsCount: 0, dialogsCount: 0, voiceRoomsCount: 0, callLogsCount: 0 };
+    }
+    this.isSyncingInBackground = true;
+
     // 1. Sync Contacts via ContactsController
     const contacts = await ContactsController.getInstance().syncContacts();
 
@@ -762,7 +814,7 @@ export class MessagesController {
         offset_date: 0,
         offset_id: 0,
         offset_peer: { _: 'inputPeerEmpty' },
-        limit: 80,
+        limit: 20,
         hash: 0
       });
 
@@ -908,8 +960,9 @@ export class MessagesController {
       // Ignore if call history search is empty
     }
 
+    this.isSyncingInBackground = false;
     return {
-      contactsCount: contacts.length,
+      contactsCount: contacts?.length || 0,
       dialogsCount,
       voiceRoomsCount,
       callLogsCount

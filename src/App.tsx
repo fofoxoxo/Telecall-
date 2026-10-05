@@ -276,6 +276,7 @@ export default function App() {
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const pendingSendCodePromiseRef = useRef<Promise<string | null> | null>(null);
 
   const currentUser: MTProtoSessionData = session || {
     dcId: 5,
@@ -333,32 +334,23 @@ export default function App() {
       });
     }
 
+    let syncTimer: ReturnType<typeof setTimeout> | null = null;
     if (session) {
-      tdlibClientEngine.syncAllTelegramData().catch(() => {});
+      // Delay background Telegram data sync by 1.5s so the UI renders smoothly without freezing Android WebView
+      syncTimer = setTimeout(() => {
+        tdlibClientEngine.syncAllTelegramData().catch(() => {});
+      }, 1500);
 
-      // Register push notifications on Android if available
+      // Request Android runtime permissions safely via AndroidAudioBridge if running inside APK
       const win = window as any;
-      if (win.Capacitor?.Plugins?.PushNotifications) {
-        const PushNotifications = win.Capacitor.Plugins.PushNotifications;
-        PushNotifications.requestPermissions()
-          .then((perm: any) => {
-            if (perm.receive === 'granted') PushNotifications.register();
-          })
-          .catch(() => {});
-        PushNotifications.addListener('registration', (tokenObj: { value: string }) => {
-          if (tokenObj?.value) {
-            tdlibClientEngine.registerFcmToken(tokenObj.value).catch(() => {});
-            apiFetch('/api/notifications/register', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                userId: session.userId,
-                fcmToken: tokenObj.value,
-                platform: 'android'
-              })
-            }).catch(() => {});
+      if (win.AndroidAudioBridge?.requestDevicePermissions) {
+        setTimeout(() => {
+          try {
+            win.AndroidAudioBridge.requestDevicePermissions();
+          } catch {
+            // ignore
           }
-        });
+        }, 800);
       }
     }
 
@@ -429,6 +421,7 @@ export default function App() {
     );
 
     return () => {
+      if (syncTimer) clearTimeout(syncTimer);
       unsubContacts();
       unsubCallHistory();
       unsubTgIncoming();
@@ -461,30 +454,36 @@ export default function App() {
     // Switch to OTP input screen immediately so the user never waits when OTP arrives fast on their phone!
     setOtpInput('');
     setAuthStep('otp');
-    setAuthLoading(true);
 
-    const res = await mtprotoEngine.sendAuthCode(phoneInput, { forceResend });
-    setAuthLoading(false);
+    const sendPromise = (async (): Promise<string | null> => {
+      try {
+        const res = await mtprotoEngine.sendAuthCode(phoneInput, { forceResend });
+        if (res.ok && res.phoneCodeHash) {
+          setPhoneCodeHash(res.phoneCodeHash);
+          setSentDeliveryType(res.deliveryType || 'app');
+          return res.phoneCodeHash;
+        } else {
+          setAuthStep('phone');
+          setAuthError(res.error || 'Could not send verification code. Please check your number.');
+          return null;
+        }
+      } catch {
+        setAuthStep('phone');
+        setAuthError('Network error while sending code. Please try again.');
+        return null;
+      }
+    })();
 
-    if (res.ok && res.phoneCodeHash) {
-      setPhoneCodeHash(res.phoneCodeHash);
-      setSentDeliveryType(res.deliveryType || 'app');
-    } else {
-      setAuthStep('phone');
-      setAuthError(res.error || 'Could not send verification code. Please check your number.');
-    }
+    pendingSendCodePromiseRef.current = sendPromise;
   };
 
-  const finalizeLoggedInSession = async (sessionData: MTProtoSessionData) => {
+  const finalizeLoggedInSession = (sessionData: MTProtoSessionData) => {
     mtprotoEngine.updateSavedProfile(sessionData);
     setSession(sessionData);
     setAuthStep('phone');
     setTwoFactorPassword('');
     setActivePage('logs');
-
-    // Immediately trigger OS Device Permission Pop-ups (Microphone, Camera & Contacts) right after authentication
     peerCallWebRtcEngine.requestAllDevicePermissionsOnLogin().catch(() => {});
-    tdlibClientEngine.syncAllTelegramData().catch(() => {});
   };
 
   const handleVerifyOtpOr2FA = async (e: React.FormEvent) => {
@@ -492,31 +491,41 @@ export default function App() {
     setAuthError('');
     setAuthLoading(true);
 
-    const res = await mtprotoEngine.verifyAuthCode({
-      phone: phoneInput,
-      code: otpInput,
-      phoneCodeHash,
-      name: firstNameInput || 'User',
-      lastName: lastNameInput,
-      twoFactorPassword: twoFactorPassword || undefined
-    });
-    setAuthLoading(false);
+    try {
+      let activeHash = phoneCodeHash;
+      if (!activeHash && pendingSendCodePromiseRef.current) {
+        activeHash = (await pendingSendCodePromiseRef.current) || '';
+      }
 
-    if (res.requires2FA) {
-      setPasswordHint(res.passwordHint || '');
-      setAuthStep('2fa');
-      return;
-    }
+      const res = await mtprotoEngine.verifyAuthCode({
+        phone: phoneInput,
+        code: otpInput,
+        phoneCodeHash: activeHash,
+        name: firstNameInput || 'User',
+        lastName: lastNameInput,
+        twoFactorPassword: twoFactorPassword || undefined
+      });
+      setAuthLoading(false);
 
-    if (res.requiresSignUp) {
-      setAuthStep('signup');
-      return;
-    }
+      if (res.requires2FA) {
+        setPasswordHint(res.passwordHint || '');
+        setAuthStep('2fa');
+        return;
+      }
 
-    if (res.ok && res.sessionData) {
-      finalizeLoggedInSession(res.sessionData);
-    } else {
-      setAuthError(res.error || 'Invalid code. Please try again.');
+      if (res.requiresSignUp) {
+        setAuthStep('signup');
+        return;
+      }
+
+      if (res.ok && res.sessionData) {
+        finalizeLoggedInSession(res.sessionData);
+      } else {
+        setAuthError(res.error || 'Invalid code. Please try again.');
+      }
+    } catch {
+      setAuthLoading(false);
+      setAuthError('Verification timed out. Please tap Next again.');
     }
   };
 

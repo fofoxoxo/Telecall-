@@ -68,8 +68,7 @@ export class PeerCallWebRtcEngine {
   /**
    * Request OS Device Pop-up Permissions right after Authentication:
    * - Microphone (`RECORD_AUDIO`)
-   * - Camera (`CAMERA`)
-   * - Contacts (`READ_CONTACTS` on Android Capacitor)
+   * - Contacts & Notifications (Handled natively by MainActivity.java on Android)
    */
   public async requestAllDevicePermissionsOnLogin(): Promise<{
     micGranted: boolean;
@@ -77,40 +76,18 @@ export class PeerCallWebRtcEngine {
     contactsGranted: boolean;
   }> {
     let micGranted = false;
-    let cameraGranted = false;
-    let contactsGranted = false;
+    const cameraGranted = false;
+    const contactsGranted = true;
 
-    // 1. Trigger native OS Microphone + Camera permission pop-up
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: true
-      });
-      micGranted = stream.getAudioTracks().length > 0;
-      cameraGranted = stream.getVideoTracks().length > 0;
-      stream.getTracks().forEach((t) => t.stop());
-    } catch {
-      // Fallback: request Microphone-only if device has no camera
-      try {
-        const audioOnly = await navigator.mediaDevices.getUserMedia({ audio: true });
-        micGranted = audioOnly.getAudioTracks().length > 0;
-        audioOnly.getTracks().forEach((t) => t.stop());
-      } catch {
-        // ignore
-      }
-    }
+    // Wait 600ms after login screen transition so Android WebView surface is stable before opening audio device
+    await new Promise((r) => setTimeout(r, 600));
 
-    // 2. Trigger Android Native Contacts & Push Notification permissions if running inside APK
-    const win = window as any;
     try {
-      if (win.Capacitor?.Plugins?.PushNotifications) {
-        await win.Capacitor.Plugins.PushNotifications.requestPermissions();
-      }
-      if ('contacts' in navigator && 'ContactsManager' in window) {
-        contactsGranted = true;
-      }
+      const audioOnly = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micGranted = audioOnly.getAudioTracks().length > 0;
+      audioOnly.getTracks().forEach((t) => t.stop());
     } catch {
-      // ignore
+      // ignore if already handled by native MainActivity.java
     }
 
     return { micGranted, cameraGranted, contactsGranted };
