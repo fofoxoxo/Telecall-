@@ -178,6 +178,42 @@ export class ClientTdlibEngine {
   public async createTdlibVoiceRoom(title: string, description: string): Promise<string | null> {
     return MessagesController.getInstance().createGroupVoiceRoom(title, description);
   }
+
+  public async getChatDialogs() {
+    return MessagesController.getInstance().getChatDialogsList();
+  }
+
+  public async getChatMessages(peer: {
+    peerType: 'user' | 'chat' | 'channel';
+    peerId: any;
+    accessHash?: any;
+  }) {
+    return MessagesController.getInstance().getChatHistory(peer);
+  }
+
+  public async sendChatMessage(
+    peer: { peerType: 'user' | 'chat' | 'channel'; peerId: any; accessHash?: any },
+    text: string
+  ) {
+    return MessagesController.getInstance().sendTextMessage(peer, text);
+  }
+
+  public async startRealCall(target: {
+    phone?: string;
+    username?: string;
+    tgId?: any;
+    accessHash?: any;
+  }) {
+    return MessagesController.getInstance().startRealTelegramCall(target);
+  }
+
+  public async discardRealCall(durationSeconds: number) {
+    return MessagesController.getInstance().discardRealTelegramCall(durationSeconds);
+  }
+
+  public async registerFcmToken(fcmToken: string) {
+    return MessagesController.getInstance().registerFcmTokenWithTelegram(fcmToken);
+  }
 }
 
 export const tdlibClientEngine = new ClientTdlibEngine();

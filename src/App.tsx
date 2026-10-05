@@ -190,8 +190,17 @@ export default function App() {
     createdAt: Date.now()
   };
 
-  // Main Navigation: 3 Primary Bottom Tabs ('calls' | 'rooms' | 'profile')
-  const [activeBottomTab, setActiveBottomTab] = useState<'calls' | 'rooms' | 'profile'>('calls');
+  // Main Navigation: 4 Primary Bottom Tabs ('chats' | 'calls' | 'rooms' | 'profile')
+  const [activeBottomTab, setActiveBottomTab] = useState<'chats' | 'calls' | 'rooms' | 'profile'>('calls');
+
+  // Real Telegram Chats Tab State (`messages.getDialogs`, `messages.getHistory`, `messages.sendMessage`)
+  const [chatDialogs, setChatDialogs] = useState<any[]>([]);
+  const [selectedDialog, setSelectedDialog] = useState<any | null>(null);
+  const [chatMessages, setChatMessages] = useState<any[]>([]);
+  const [chatInputText, setChatInputText] = useState('');
+  const [loadingChats, setLoadingChats] = useState(false);
+  const [sendingChatMsg, setSendingChatMsg] = useState(false);
+  const [callStatusNotice, setCallStatusNotice] = useState<string>('');
 
   // Calls Tab Floating Sub-Views: Call Logs | Thumb-Zone Dialer | Contacts
   const [callsSubTab, setCallsSubTab] = useState<'logs' | 'dialer' | 'contacts'>('logs');
@@ -427,8 +436,41 @@ export default function App() {
       setSyncingCache4Db(true);
       tdlibClientEngine
         .syncAllTelegramData()
+        .then(() => tdlibClientEngine.getChatDialogs())
+        .then((list) => {
+          if (Array.isArray(list) && list.length > 0) {
+            setChatDialogs(list);
+          }
+        })
         .catch(() => {})
         .finally(() => setSyncingCache4Db(false));
+
+      // Register Android Capacitor / Web Push FCM Token (`google-services.json` + `account.registerDevice`)
+      const win = window as any;
+      if (win.Capacitor?.Plugins?.PushNotifications) {
+        const PushNotifications = win.Capacitor.Plugins.PushNotifications;
+        PushNotifications.requestPermissions()
+          .then((perm: any) => {
+            if (perm.receive === 'granted') {
+              PushNotifications.register();
+            }
+          })
+          .catch(() => {});
+        PushNotifications.addListener('registration', (tokenObj: { value: string }) => {
+          if (tokenObj?.value) {
+            tdlibClientEngine.registerFcmToken(tokenObj.value).catch(() => {});
+            apiFetch('/api/notifications/register', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                userId: session.userId,
+                fcmToken: tokenObj.value,
+                platform: 'android'
+              })
+            }).catch(() => {});
+          }
+        });
+      }
     }
 
     // Plus Messenger / Official Telegram NotificationCenter observers for real-time updates
@@ -437,6 +479,23 @@ export default function App() {
       (loadedContacts) => {
         if (Array.isArray(loadedContacts) && loadedContacts.length > 0) {
           setContacts(loadedContacts);
+        }
+      }
+    );
+
+    const unsubNewMsg = NotificationCenter.getInstance().addObserver(
+      NotificationEvents.didReceiveNewMessage,
+      (newMsg) => {
+        if (newMsg?.text) {
+          setChatMessages((prev) => [
+            ...prev,
+            {
+              id: String(newMsg.id || Date.now()),
+              text: newMsg.text,
+              out: Boolean(newMsg.out),
+              timestamp: 'Now'
+            }
+          ]);
         }
       }
     );
@@ -522,6 +581,7 @@ export default function App() {
 
     return () => {
       unsubContacts();
+      unsubNewMsg();
       unsubVoiceRooms();
       unsubCallHistory();
       unsubEvents();
@@ -569,9 +629,69 @@ export default function App() {
     setTimeout(() => setCopiedId(null), 1800);
   };
 
-  const startCall = async (contactName: string, phone: string, calleeId = 'remote') => {
+  const startCall = async (
+    contactName: string,
+    phone: string,
+    calleeId = 'remote',
+    username?: string,
+    tgId?: any,
+    accessHash?: any
+  ) => {
     if (!phone.trim() && !contactName.trim()) return;
     playTone(540, 0.14);
+    setCallStatusNotice('Requesting real Telegram VoIP Call (phone.requestCall)...');
+
+    setActiveCall({
+      contactName,
+      phone,
+      sessionId: 'call-connecting',
+      emojis: ['🔐', '✈️', '🛡️', '⚡'],
+      isMuted: false,
+      isSpeakerOn: true,
+      lowNetworkMode: true
+    });
+
+    // 1. Trigger REAL Telegram MTProto `phone.requestCall` on Telegram DC so target user's official Telegram rings!
+    const realCallRes = await tdlibClientEngine.startRealCall({
+      phone: phone.trim(),
+      username,
+      tgId,
+      accessHash
+    });
+
+    if (realCallRes.ok) {
+      setCallStatusNotice(
+        `Ringing on Official Telegram App (${realCallRes.protocolInfo || 'MTProto P2P'})`
+      );
+      setActiveCall((prev) =>
+        prev
+          ? {
+              ...prev,
+              sessionId: realCallRes.callId || 'tg-live-call',
+              emojis: realCallRes.dhEmojis || ['🔐', '✈️', '🛡️', '⚡']
+            }
+          : null
+      );
+      const newLog: CallLogEntry = {
+        id: 'log-' + Date.now(),
+        contactName,
+        phone,
+        username,
+        direction: 'outgoing',
+        durationSeconds: 0,
+        timestamp: 'Just now',
+        codecUsed: 'Telegram MTProto VoIP (phone.requestCall)',
+        dhEmojis: realCallRes.dhEmojis || ['🔐', '✈️', '🛡️', '⚡']
+      };
+      setCallLogs((prev) => [newLog, ...prev]);
+      return;
+    }
+
+    // 2. Show exact reason if Telegram call could not be placed (e.g. not logged in or number not on Telegram)
+    setCallStatusNotice(
+      realCallRes.error || 'Could not ring Telegram peer; using TeleCall SFU.'
+    );
+
     try {
       const res = await apiFetch('/api/call/handshake', {
         method: 'POST',
@@ -585,36 +705,17 @@ export default function App() {
         })
       });
       const data = await res.json();
-      setActiveCall({
-        contactName,
-        phone,
-        sessionId: data.sessionId || 'call-1',
-        emojis: data.emojis || ['🔐', '🚀', '🦁', '🎸'],
-        isMuted: false,
-        isSpeakerOn: true,
-        lowNetworkMode: true
-      });
+      setActiveCall((prev) =>
+        prev
+          ? {
+              ...prev,
+              sessionId: data.sessionId || 'call-1',
+              emojis: data.emojis || ['🔐', '🚀', '🦁', '🎸']
+            }
+          : null
+      );
     } catch {
-      const newLog: CallLogEntry = {
-        id: 'log-' + Date.now(),
-        contactName,
-        phone,
-        direction: 'outgoing',
-        durationSeconds: 0,
-        timestamp: 'Just now',
-        codecUsed: 'Opus 12 kbps (SFU)',
-        dhEmojis: ['🔐', '🚀', '🦁', '🎸']
-      };
-      setCallLogs((prev) => [newLog, ...prev]);
-      setActiveCall({
-        contactName,
-        phone,
-        sessionId: 'call-local',
-        emojis: ['🔐', '🚀', '🦁', '🎸'],
-        isMuted: false,
-        isSpeakerOn: true,
-        lowNetworkMode: true
-      });
+      // ignore
     }
   };
 
@@ -670,8 +771,68 @@ export default function App() {
     setSyncingCache4Db(true);
     tdlibClientEngine
       .syncAllTelegramData()
+      .then(() => tdlibClientEngine.getChatDialogs())
+      .then((list) => {
+        if (Array.isArray(list) && list.length > 0) {
+          setChatDialogs(list);
+        }
+      })
       .catch(() => {})
       .finally(() => setSyncingCache4Db(false));
+  };
+
+  const handleRefreshChats = async () => {
+    setLoadingChats(true);
+    try {
+      const list = await tdlibClientEngine.getChatDialogs();
+      setChatDialogs(list);
+    } finally {
+      setLoadingChats(false);
+    }
+  };
+
+  const handleOpenDialog = async (dialog: any) => {
+    setSelectedDialog(dialog);
+    setLoadingChats(true);
+    try {
+      const history = await tdlibClientEngine.getChatMessages({
+        peerType: dialog.peerType,
+        peerId: dialog.peerId,
+        accessHash: dialog.accessHash
+      });
+      setChatMessages(history);
+    } finally {
+      setLoadingChats(false);
+    }
+  };
+
+  const handleSendChatMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedDialog || !chatInputText.trim()) return;
+    const text = chatInputText.trim();
+    setChatInputText('');
+    setSendingChatMsg(true);
+
+    // Optimistic render
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: 'local-' + Date.now(),
+        text,
+        out: true,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      }
+    ]);
+
+    await tdlibClientEngine.sendChatMessage(
+      {
+        peerType: selectedDialog.peerType,
+        peerId: selectedDialog.peerId,
+        accessHash: selectedDialog.accessHash
+      },
+      text
+    );
+    setSendingChatMsg(false);
   };
 
   const handleVerifyOtpOr2FA = async (e: React.FormEvent) => {
@@ -2018,6 +2179,183 @@ export default function App() {
                 </div>
               </div>
             )}
+
+            {/* TAB 0: REAL TELEGRAM CHATS TAB (`messages.getDialogs`, `messages.getHistory`, `messages.sendMessage`) */}
+            {activeBottomTab === 'chats' && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-lg font-bold">Telegram Chats</h2>
+                    <p className={`text-xs ${palette.textSecondary}`}>
+                      Synced directly from your Telegram account (`cache4.db` & `messages.getDialogs`)
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleRefreshChats}
+                    className={`min-h-[38px] px-3 py-1.5 rounded-xl border ${palette.border} text-xs font-semibold flex items-center gap-1.5`}
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loadingChats ? 'animate-spin' : ''}`} />
+                    <span>Refresh Chats</span>
+                  </button>
+                </div>
+
+                {!session && (
+                  <div className={`${palette.bgCard} border ${palette.border} rounded-2xl p-5 text-center space-y-3`}>
+                    <MessageSquare className="w-8 h-8 text-sky-400 mx-auto" />
+                    <div className="text-sm font-bold">Connect Your Telegram Account</div>
+                    <p className={`text-xs ${palette.textSecondary}`}>
+                      Log in with your Telegram phone number to load all your real personal chats, groups, and channels.
+                    </p>
+                    <button
+                      onClick={openAuthModal}
+                      className="min-h-[40px] px-4 py-2 rounded-xl bg-sky-500 text-slate-950 text-xs font-bold"
+                    >
+                      Login with Telegram
+                    </button>
+                  </div>
+                )}
+
+                {selectedDialog ? (
+                  <div className={`${palette.bgCard} border ${palette.border} rounded-2xl overflow-hidden flex flex-col h-[62vh]`}>
+                    {/* Chat Header with Direct Call Button */}
+                    <div className={`px-4 py-3 border-b ${palette.border} flex items-center justify-between`}>
+                      <div className="flex items-center gap-3 min-w-0">
+                        <button
+                          onClick={() => setSelectedDialog(null)}
+                          className={`p-1.5 rounded-xl border ${palette.border}`}
+                        >
+                          <ArrowLeft className="w-4 h-4" />
+                        </button>
+                        <div className="min-w-0">
+                          <div className="text-sm font-bold truncate">{selectedDialog.title}</div>
+                          <div className={`text-[11px] ${palette.textSecondary} truncate`}>
+                            {selectedDialog.subtitle}
+                          </div>
+                        </div>
+                      </div>
+                      {selectedDialog.peerType === 'user' && (
+                        <button
+                          onClick={() =>
+                            startCall(
+                              selectedDialog.title,
+                              selectedDialog.subtitle,
+                              String(selectedDialog.peerId),
+                              selectedDialog.subtitle,
+                              selectedDialog.peerId,
+                              selectedDialog.accessHash
+                            )
+                          }
+                          className="min-h-[36px] px-3 py-1.5 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 text-xs font-semibold flex items-center gap-1.5"
+                        >
+                          <Phone className="w-3.5 h-3.5" />
+                          <span>Call</span>
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Messages List */}
+                    <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
+                      {chatMessages.length === 0 ? (
+                        <div className={`text-center text-xs ${palette.textSecondary} py-12`}>
+                          {loadingChats ? 'Loading messages from Telegram DC...' : 'No messages yet. Say hello!'}
+                        </div>
+                      ) : (
+                        chatMessages.map((m) => (
+                          <div
+                            key={m.id}
+                            className={`flex flex-col ${m.out ? 'items-end' : 'items-start'}`}
+                          >
+                            <div
+                              className={`max-w-[78%] px-3.5 py-2 rounded-2xl text-xs ${
+                                m.out
+                                  ? 'bg-sky-500 text-slate-950 font-medium rounded-br-sm'
+                                  : `${palette.bgMain} border ${palette.border} rounded-bl-sm`
+                              }`}
+                            >
+                              <div>{m.text}</div>
+                              <div
+                                className={`text-[10px] mt-1 text-right ${
+                                  m.out ? 'text-slate-900/75' : palette.textSecondary
+                                }`}
+                              >
+                                {m.timestamp}
+                              </div>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+
+                    {/* Message Input Composer (`messages.sendMessage`) */}
+                    <form
+                      onSubmit={handleSendChatMessage}
+                      className={`p-3 border-t ${palette.border} flex items-center gap-2`}
+                    >
+                      <input
+                        type="text"
+                        placeholder="Write a Telegram message..."
+                        value={chatInputText}
+                        onChange={(e) => setChatInputText(e.target.value)}
+                        className={`flex-1 h-10 px-3.5 rounded-xl ${palette.bgMain} border ${palette.border} text-xs focus:outline-none focus:border-sky-500`}
+                      />
+                      <button
+                        type="submit"
+                        disabled={sendingChatMsg || !chatInputText.trim()}
+                        className="min-h-[40px] px-4 rounded-xl bg-sky-500 text-slate-950 text-xs font-bold"
+                      >
+                        Send
+                      </button>
+                    </form>
+                  </div>
+                ) : (
+                  <div className={`${palette.bgCard} border ${palette.border} rounded-2xl divide-y divide-slate-800/60 overflow-hidden`}>
+                    {chatDialogs.length === 0 ? (
+                      <div className={`p-6 text-center text-xs ${palette.textSecondary}`}>
+                        {loadingChats
+                          ? 'Fetching dialogs from Telegram...'
+                          : 'Tap "Refresh Chats" to load your Telegram conversations.'}
+                      </div>
+                    ) : (
+                      chatDialogs.map((d) => (
+                        <div
+                          key={d.id}
+                          onClick={() => handleOpenDialog(d)}
+                          className="p-3.5 flex items-center justify-between gap-3 cursor-pointer hover:bg-slate-800/30 transition-colors"
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-11 h-11 rounded-full bg-sky-500/15 text-sky-400 flex items-center justify-center font-bold text-sm shrink-0">
+                              {d.title.slice(0, 2).toUpperCase()}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-semibold truncate">{d.title}</span>
+                                {d.online && (
+                                  <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                                )}
+                              </div>
+                              <div className={`text-xs ${palette.textSecondary} truncate mt-0.5`}>
+                                {d.lastMessageText}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col items-end gap-1 shrink-0">
+                            <span className={`text-[10px] ${palette.textSecondary}`}>
+                              {d.timestamp}
+                            </span>
+                            {d.unreadCount > 0 && (
+                              <span className="px-2 py-0.5 rounded-full bg-sky-500 text-slate-950 text-[10px] font-bold">
+                                {d.unreadCount}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </>
         )}
       </main>
@@ -2534,6 +2872,11 @@ export default function App() {
             <div>
               <h2 className="text-2xl font-bold">{activeCall.contactName}</h2>
               <p className={`text-xs ${palette.textSecondary} mt-1`}>{activeCall.phone}</p>
+              {callStatusNotice && (
+                <p className="text-xs text-sky-400 font-medium mt-2 px-3 py-1 rounded-full bg-sky-500/10 inline-block">
+                  {callStatusNotice}
+                </p>
+              )}
             </div>
 
             <div className={`p-4 rounded-2xl ${palette.bgCard} border ${palette.border} max-w-xs mx-auto`}>
@@ -2586,6 +2929,8 @@ export default function App() {
             <button
               onClick={() => {
                 playTone(300, 0.16);
+                tdlibClientEngine.discardRealCall(callSeconds).catch(() => {});
+                setCallStatusNotice('');
                 setActiveCall(null);
               }}
               className="h-14 rounded-2xl bg-rose-500 hover:bg-rose-600 text-white flex flex-col items-center justify-center gap-1 text-xs font-semibold"
@@ -2597,10 +2942,25 @@ export default function App() {
         </div>
       )}
 
-      {/* 3 PRIMARY BOTTOM TABS: Calls | Voice Rooms | Profile */}
+      {/* 4 PRIMARY BOTTOM TABS: Chats | Calls | Voice Rooms | Profile */}
       <nav
-        className={`fixed bottom-0 left-0 right-0 z-40 h-16 max-w-2xl mx-auto ${palette.bgCard} border-t ${palette.border} grid grid-cols-3 items-center`}
+        className={`fixed bottom-0 left-0 right-0 z-40 h-16 max-w-2xl mx-auto ${palette.bgCard} border-t ${palette.border} grid grid-cols-4 items-center`}
       >
+        <button
+          onClick={() => {
+            setActiveBottomTab('chats');
+            if (chatDialogs.length === 0 && session) {
+              handleRefreshChats();
+            }
+          }}
+          className={`h-full flex flex-col items-center justify-center transition-colors ${
+            activeBottomTab === 'chats' ? palette.accentText : palette.textSecondary
+          }`}
+        >
+          <MessageSquare className="w-5 h-5" />
+          <span className="text-xs font-semibold mt-1">Chats</span>
+        </button>
+
         <button
           onClick={() => setActiveBottomTab('calls')}
           className={`h-full flex flex-col items-center justify-center transition-colors ${

@@ -49,7 +49,7 @@ jobs:
       - name: 4. Install NPM & Capacitor Dependencies
         run: |
           npm install --legacy-peer-deps --no-audit --no-fund
-          npm install @capacitor/core@latest @capacitor/cli@latest @capacitor/android@latest @capacitor/status-bar@latest @capacitor/keyboard@latest --legacy-peer-deps --no-audit --no-fund
+          npm install @capacitor/core@latest @capacitor/cli@latest @capacitor/android@latest @capacitor/status-bar@latest @capacitor/keyboard@latest @capacitor/push-notifications@latest --legacy-peer-deps --no-audit --no-fund
 
       # 4. Requirement 2: Secret Injection into Runtime Environment & .env File
       - name: 5. Inject GitHub Secrets into Runtime Environment & .env
@@ -157,13 +157,21 @@ jobs:
           if [ ! -d "android/app" ]; then
             npx cap add android
           fi
+
+          # Copy user's google-services.json or googleservices.json into android/app/google-services.json for native FCM Push Notifications
+          if [ -f "google-services.json" ]; then
+            cp google-services.json android/app/google-services.json
+          elif [ -f "googleservices.json" ]; then
+            cp googleservices.json android/app/google-services.json
+          fi
+
           npx cap sync android
           chmod +x android/gradlew || true
 
-          # Inject Android Audio, Microphone & Contact Permissions
+          # Inject Android Audio, Microphone, Contact & FCM Push Notification Permissions
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST" ] && ! grep -q "android.permission.RECORD_AUDIO" "$MANIFEST"; then
-            sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <uses-permission android:name="android.permission.BLUETOOTH" />\n    <uses-permission android:name="android.permission.READ_CONTACTS" />' "$MANIFEST"
+            sed -i '/<\/manifest>/i \    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <uses-permission android:name="android.permission.BLUETOOTH" />\n    <uses-permission android:name="android.permission.READ_CONTACTS" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />' "$MANIFEST"
           fi
 
           cd android
