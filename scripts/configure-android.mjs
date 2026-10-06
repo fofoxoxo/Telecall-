@@ -27,13 +27,13 @@ if (mode === 'pre-cap') {
       allowMixedContent: true,
       captureInput: true,
       webContentsDebuggingEnabled: true,
-      backgroundColor: '#0b141a'
+      backgroundColor: '#ffffff'
     },
     plugins: {
       StatusBar: {
         overlaysWebView: false,
-        style: 'DARK',
-        backgroundColor: '#111b21'
+        style: 'LIGHT',
+        backgroundColor: '#ffffff'
       }
     }
   };
@@ -100,8 +100,8 @@ public class MainActivity extends BridgeActivity {
         try {
             Window window = getWindow();
             if (window != null) {
-                window.setStatusBarColor(Color.parseColor("#111b21"));
-                window.setNavigationBarColor(Color.parseColor("#0b141a"));
+                window.setStatusBarColor(Color.parseColor("#ffffff"));
+                window.setNavigationBarColor(Color.parseColor("#ffffff"));
             }
         } catch (Exception ignored) {}
 
@@ -121,6 +121,28 @@ public class MainActivity extends BridgeActivity {
                 });
             }
         } catch (Exception ignored) {}
+    }
+
+    @Override
+    public void onBackPressed() {
+        try {
+            if (this.bridge != null && this.bridge.getWebView() != null) {
+                this.bridge.getWebView().evaluateJavascript(
+                    "(function(){ if(window.__telecallHandleHardwareBack && window.__telecallHandleHardwareBack()) { return 'handled'; } return 'root'; })()",
+                    value -> {
+                        if (value == null || !value.contains("handled")) {
+                            if (this.bridge.getWebView().canGoBack()) {
+                                this.bridge.getWebView().goBack();
+                            } else {
+                                moveTaskToBack(true);
+                            }
+                        }
+                    }
+                );
+                return;
+            }
+        } catch (Exception ignored) {}
+        super.onBackPressed();
     }
 
     private void requestAppRuntimePermissions() {

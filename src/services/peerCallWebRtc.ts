@@ -137,8 +137,10 @@ export class PeerCallWebRtcEngine {
         .replace(/[^\d]/g, '')
         .slice(-10);
 
-      if (event === 'call:offer') {
+      if (event === 'call:offer' || event === 'call:incoming') {
         if (payload.callerId === me.userId) return;
+        // Avoid duplicate trigger if already ringing or in call with same session
+        if (this.currentSessionId === payload.sessionId && event === 'call:incoming') return;
         if (
           !targetCleanPhone ||
           !myCleanPhone ||
@@ -215,8 +217,6 @@ export class PeerCallWebRtcEngine {
 
       processor.onaudioprocess = (e) => {
         if (this.isMuted || this.isHeld || !this.currentSessionId) return;
-        // If WebRTC direct P2P is already connected and flowing, skip redundant WS relay packets
-        if (this.pc && this.pc.connectionState === 'connected') return;
 
         const input = e.inputBuffer.getChannelData(0);
         // Check voice energy (VAD) so we don't send silence
@@ -224,7 +224,7 @@ export class PeerCallWebRtcEngine {
         for (let i = 0; i < input.length; i++) {
           sum += Math.abs(input[i]);
         }
-        if (sum / input.length < 0.004) return;
+        if (sum / input.length < 0.003) return;
 
         // Encode Float32 [-1..1] to Int16 PCM Base64
         const int16 = new Int16Array(input.length);

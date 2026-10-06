@@ -133,6 +133,7 @@ export class ClientMTProtoEngine {
   private connectionListeners = new Set<ConnectionListener>();
   private eventListeners = new Set<EventListener>();
   private seqNo = 0;
+  private pendingFrames: string[] = [];
 
   constructor() {
     this.session = new StringSession();
@@ -157,6 +158,12 @@ export class ClientMTProtoEngine {
     this.socket.onopen = () => {
       this.isConnected = true;
       this.notifyConnection(true);
+
+      // Flush any queued signaling frames (`call:offer`, `call:answer`, `call:ice`)
+      while (this.pendingFrames.length > 0 && this.socket?.readyState === WebSocket.OPEN) {
+        const frame = this.pendingFrames.shift();
+        if (frame) this.socket.send(frame);
+      }
 
       // Send initial MTProto transport handshake frame with StringSession
       const savedSession = this.session.load();
@@ -196,16 +203,20 @@ export class ClientMTProtoEngine {
   }
 
   public sendTransportFrame(type: string, payload: Record<string, unknown> = {}): void {
+    this.seqNo += 1;
+    const serialized = JSON.stringify({
+      type,
+      seqNo: this.seqNo,
+      msgId: `${Date.now()}-${this.seqNo}`,
+      payload,
+    });
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.seqNo += 1;
-      this.socket.send(
-        JSON.stringify({
-          type,
-          seqNo: this.seqNo,
-          msgId: `${Date.now()}-${this.seqNo}`,
-          payload,
-        })
-      );
+      this.socket.send(serialized);
+    } else {
+      if (this.pendingFrames.length < 100) {
+        this.pendingFrames.push(serialized);
+      }
+      this.initPersistentConnection();
     }
   }
 
