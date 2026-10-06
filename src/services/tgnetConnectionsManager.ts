@@ -5,6 +5,47 @@ import { getSavedTelegramCredentials } from './mtprotoClient';
 /**
  * 1. BuildVars (Modeled directly after Official Telegram / Plus Messenger `BuildVars.java`)
  */
+function detectRealDeviceMetadata(): {
+  deviceModel: string;
+  systemVersion: string;
+  appVersion: string;
+} {
+  if (typeof window !== 'undefined') {
+    const win = window as any;
+    if (win.AndroidAudioBridge?.getDeviceModel) {
+      try {
+        const model = String(win.AndroidAudioBridge.getDeviceModel() || '').trim();
+        const osVer = String(win.AndroidAudioBridge.getAndroidVersion?.() || '').trim();
+        if (model) {
+          return {
+            deviceModel: model,
+            systemVersion: osVer || 'Android 14',
+            appVersion: 'TeleCall Android 1.0.0'
+          };
+        }
+      } catch {
+        // ignore
+      }
+    }
+    const ua = navigator.userAgent || '';
+    const androidMatch = ua.match(/Android\s+([0-9.]+);\s*([^;)]+)/i);
+    if (androidMatch) {
+      const osVer = `Android ${androidMatch[1]}`;
+      const model = androidMatch[2].replace(/Build\/.*$/i, '').trim() || 'Android Phone';
+      return {
+        deviceModel: model,
+        systemVersion: osVer,
+        appVersion: 'TeleCall Android 1.0.0'
+      };
+    }
+  }
+  return {
+    deviceModel: 'TeleCall Android Phone',
+    systemVersion: 'Android 14',
+    appVersion: 'TeleCall Android 1.0.0'
+  };
+}
+
 export class BuildVars {
   public static get APP_ID(): number {
     const saved = getSavedTelegramCredentials();
@@ -20,9 +61,19 @@ export class BuildVars {
     );
   }
 
-  public static readonly BUILD_VERSION_STRING = '1.0.0';
-  public static readonly DEVICE_MODEL = 'TeleCall Android';
-  public static readonly SYSTEM_VERSION = 'Android 14';
+  public static readonly BUILD_VERSION_STRING = 'TeleCall Android 1.0.0';
+
+  public static get DEVICE_MODEL(): string {
+    return detectRealDeviceMetadata().deviceModel;
+  }
+
+  public static get SYSTEM_VERSION(): string {
+    return detectRealDeviceMetadata().systemVersion;
+  }
+
+  public static get APP_VERSION(): string {
+    return detectRealDeviceMetadata().appVersion;
+  }
 }
 
 /**
@@ -273,6 +324,40 @@ export class ConnectionsManager {
         }
       });
 
+      // Patch @mtproto/core's internal RPC instances so `initConnection` sends our real
+      // Device Model (e.g. "Samsung SM-S918B"), OS ("Android 14"), and App ("TeleCall Android 1.0.0")
+      // instead of "@mtproto/core" in Telegram's Active Sessions list!
+      const patchRpcInitConnection = (rpcInstance: any) => {
+        if (!rpcInstance || rpcInstance.__telecallPatched) return;
+        rpcInstance.__telecallPatched = true;
+        const origCall = rpcInstance.call?.bind(rpcInstance);
+        if (typeof origCall === 'function') {
+          rpcInstance.call = (method: string, params: any = {}) => {
+            if (method === 'initConnection') {
+              params = {
+                ...params,
+                device_model: BuildVars.DEVICE_MODEL,
+                system_version: BuildVars.SYSTEM_VERSION,
+                app_version: BuildVars.APP_VERSION,
+                system_lang_code: navigator.language || 'en',
+                lang_code: 'en'
+              };
+            }
+            return origCall(method, params);
+          };
+        }
+      };
+
+      const mtAny = this.mtproto as any;
+      if (typeof mtAny.getRPC === 'function') {
+        const origGetRpc = mtAny.getRPC.bind(mtAny);
+        mtAny.getRPC = async (...args: any[]) => {
+          const rpc = await origGetRpc(...args);
+          patchRpcInitConnection(rpc);
+          return rpc;
+        };
+      }
+
       const updatesEvents = [
         'updatesTooLong',
         'updateShortMessage',
@@ -380,15 +465,36 @@ export class ConnectionsManager {
                 NotificationEvents.didReceiveIncomingCall,
                 pc
               );
+            } else if (pc._ === 'phoneCallWaiting') {
+              NotificationCenter.getInstance().postNotificationName(
+                'telegramCallRinging',
+                pc
+              );
+            } else if (pc._ === 'phoneCallDiscarded') {
+              NotificationCenter.getInstance().postNotificationName(
+                'telegramCallDiscarded',
+                pc
+              );
             } else if (pc._ === 'phoneCallAccepted') {
               // Automatically complete DH handshake (`phone.confirmCall`) so audio starts immediately
               MessagesController.getInstance()
                 .confirmRealTelegramCall({
                   id: pc.id,
-                  access_hash: pc.access_hash
+                  access_hash: pc.access_hash,
+                  g_b: pc.g_b
                 })
                 .then((confirmedPc) => {
                   if (confirmedPc) {
+                    const win = window as any;
+                    if (win.AndroidAudioBridge?.startVoipService) {
+                      try {
+                        win.AndroidAudioBridge.startVoipService(
+                          JSON.stringify(confirmedPc.connections || [])
+                        );
+                      } catch {
+                        // ignore
+                      }
+                    }
                     NotificationCenter.getInstance().postNotificationName(
                       'voipEndpointsReady',
                       {
@@ -402,6 +508,16 @@ export class ConnectionsManager {
                 })
                 .catch(() => {});
             } else if (pc._ === 'phoneCall') {
+              const win = window as any;
+              if (win.AndroidAudioBridge?.startVoipService) {
+                try {
+                  win.AndroidAudioBridge.startVoipService(
+                    JSON.stringify(pc.connections || [])
+                  );
+                } catch {
+                  // ignore
+                }
+              }
               // Extract Telegram VoIP Relay Endpoints (`connections`, `p2p_allowed`, `key_fingerprint`)
               NotificationCenter.getInstance().postNotificationName(
                 'voipEndpointsReady',
@@ -1048,6 +1164,70 @@ export class MessagesController {
    */
   private activePhoneCallPeer: { id: any; access_hash: any } | null = null;
   private lastCallGa: Uint8Array | null = null;
+  private lastCallSecretA: bigint | null = null;
+  private lastDhPrimeP: bigint | null = null;
+
+  private bytesToBigInt(bytes: Uint8Array): bigint {
+    let hex = '';
+    for (let i = 0; i < bytes.length; i++) {
+      hex += bytes[i].toString(16).padStart(2, '0');
+    }
+    return BigInt('0x' + (hex || '0'));
+  }
+
+  private bigIntTo256Bytes(num: bigint): Uint8Array {
+    const hex = num.toString(16).padStart(512, '0').slice(-512);
+    const out = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) {
+      out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    }
+    return out;
+  }
+
+  private modPow(base: bigint, exp: bigint, mod: bigint): bigint {
+    if (mod <= 0n) return 1n;
+    let result = 1n;
+    let b = base % mod;
+    let e = exp;
+    while (e > 0n) {
+      if (e & 1n) result = (result * b) % mod;
+      e >>= 1n;
+      b = (b * b) % mod;
+    }
+    return result;
+  }
+
+  private async generateValidDhPublicValue(): Promise<{ pubBytes: Uint8Array; hashBytes: Uint8Array }> {
+    const randA = new Uint8Array(256);
+    crypto.getRandomValues(randA);
+    let pubBytes: Uint8Array = randA;
+
+    try {
+      const dhConfig = await ConnectionsManager.getInstance().sendRequest('messages.getDhConfig', {
+        version: 0,
+        random_length: 256
+      });
+      if (dhConfig?.p && dhConfig?.g) {
+        const pBig = this.bytesToBigInt(new Uint8Array(dhConfig.p));
+        const gBig = BigInt(dhConfig.g);
+        const aBig = this.bytesToBigInt(randA);
+        if (pBig > 2n) {
+          this.lastDhPrimeP = pBig;
+          this.lastCallSecretA = aBig;
+          const gaBig = this.modPow(gBig, aBig, pBig);
+          pubBytes = this.bigIntTo256Bytes(gaBig);
+        }
+      }
+    } catch {
+      // Fallback to high-entropy 256-byte array
+    }
+
+    const hashBuffer = await crypto.subtle.digest('SHA-256', pubBytes as unknown as BufferSource);
+    return {
+      pubBytes,
+      hashBytes: new Uint8Array(hashBuffer)
+    };
+  }
 
   public async startRealTelegramCall(target: {
     phone?: string;
@@ -1155,12 +1335,9 @@ export class MessagesController {
         };
       }
 
-      // 2. Generate 256-byte Diffie-Hellman `g_a` and 32-byte `g_a_hash` (SHA-256)
-      const gA = new Uint8Array(256);
-      crypto.getRandomValues(gA);
+      // 2. Generate valid 256-byte Diffie-Hellman `g_a = g^a mod p` (`messages.getDhConfig`) and 32-byte `g_a_hash` (SHA-256)
+      const { pubBytes: gA, hashBytes: gAHash } = await this.generateValidDhPublicValue();
       this.lastCallGa = gA;
-      const hashBuffer = await crypto.subtle.digest('SHA-256', gA);
-      const gAHash = new Uint8Array(hashBuffer);
 
       // 3. Invoke official `phone.requestCall` on Telegram DC
       const callRes = await ConnectionsManager.getInstance().sendRequest('phone.requestCall', {
@@ -1173,7 +1350,7 @@ export class MessagesController {
           udp_reflector: true,
           min_layer: 65,
           max_layer: 92,
-          library_versions: ['4.0.0', '3.0.0', '2.4.4']
+          library_versions: ['4.1.2', '4.0.2', '4.0.0', '3.0.0', '2.7.7', '2.4.4']
         },
         video: false
       });
@@ -1220,8 +1397,7 @@ export class MessagesController {
     if (!peer) return false;
     this.activePhoneCallPeer = peer;
     try {
-      const gB = new Uint8Array(256);
-      crypto.getRandomValues(gB);
+      const { pubBytes: gB } = await this.generateValidDhPublicValue();
       await ConnectionsManager.getInstance().sendRequest('phone.acceptCall', {
         peer: {
           _: 'inputPhoneCall',
@@ -1235,7 +1411,7 @@ export class MessagesController {
           udp_reflector: true,
           min_layer: 65,
           max_layer: 92,
-          library_versions: ['4.0.0', '3.0.0', '2.4.4']
+          library_versions: ['4.1.2', '4.0.2', '4.0.0', '3.0.0', '2.7.7', '2.4.4']
         }
       });
       return true;
@@ -1251,8 +1427,30 @@ export class MessagesController {
   public async confirmRealTelegramCall(acceptedCall: {
     id: any;
     access_hash: any;
+    g_b?: Uint8Array;
   }): Promise<any> {
     const gA = this.lastCallGa || new Uint8Array(256);
+    let keyFingerprint: any = 0;
+
+    // Compute official Telegram DH shared key = (g_b)^a mod p and 64-bit SHA-1 key_fingerprint
+    if (acceptedCall.g_b && this.lastCallSecretA && this.lastDhPrimeP) {
+      try {
+        const gbBig = this.bytesToBigInt(new Uint8Array(acceptedCall.g_b));
+        const sharedKeyBig = this.modPow(gbBig, this.lastCallSecretA, this.lastDhPrimeP);
+        const sharedKeyBytes = this.bigIntTo256Bytes(sharedKeyBig);
+        const sha1Buf = await crypto.subtle.digest(
+          'SHA-1',
+          sharedKeyBytes as unknown as BufferSource
+        );
+        const sha1Bytes = new Uint8Array(sha1Buf);
+        // Last 8 bytes of SHA-1 in little-endian signed 64-bit integer
+        const view = new DataView(sha1Bytes.buffer, 12, 8);
+        keyFingerprint = view.getBigInt64(0, true).toString();
+      } catch {
+        keyFingerprint = 0;
+      }
+    }
+
     try {
       const res = await ConnectionsManager.getInstance().sendRequest('phone.confirmCall', {
         peer: {
@@ -1261,14 +1459,14 @@ export class MessagesController {
           access_hash: acceptedCall.access_hash
         },
         g_a: gA,
-        key_fingerprint: 0,
+        key_fingerprint: keyFingerprint,
         protocol: {
           _: 'phoneCallProtocol',
           udp_p2p: true,
           udp_reflector: true,
           min_layer: 65,
           max_layer: 92,
-          library_versions: ['4.0.0', '3.0.0', '2.4.4']
+          library_versions: ['4.1.2', '4.0.2', '4.0.0', '3.0.0', '2.7.7', '2.4.4']
         }
       });
       return res?.phone_call || null;

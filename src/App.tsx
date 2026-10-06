@@ -503,6 +503,32 @@ export default function App() {
       }
     );
 
+    const unsubTgRinging = NotificationCenter.getInstance().addObserver(
+      'telegramCallRinging',
+      () => {
+        playTone(440, 0.2);
+        setActiveCall((prev) => (prev && prev.status !== 'connected' ? { ...prev, status: 'ringing' } : prev));
+      }
+    );
+
+    const unsubTgConnected = NotificationCenter.getInstance().addObserver(
+      'voipEndpointsReady',
+      () => {
+        playTone(680, 0.15);
+        setActiveCall((prev) => (prev ? { ...prev, status: 'connected' } : null));
+      }
+    );
+
+    const unsubTgDiscarded = NotificationCenter.getInstance().addObserver(
+      'telegramCallDiscarded',
+      () => {
+        playTone(300, 0.18);
+        peerCallWebRtcEngine.cleanup();
+        setActiveCall(null);
+        setIncomingCall(null);
+      }
+    );
+
     const unsubTgIncoming = NotificationCenter.getInstance().addObserver(
       NotificationEvents.didReceiveIncomingCall,
       (pc) => {
@@ -550,15 +576,18 @@ export default function App() {
       unsubAutoLogin();
       unsubContacts();
       unsubCallHistory();
+      unsubTgRinging();
+      unsubTgConnected();
+      unsubTgDiscarded();
       unsubTgIncoming();
       unsubWebRtc();
     };
   }, [session, currentUser.phone, currentUser.userId, phoneInput]);
 
-  // Call duration timer
+  // Call duration timer (only ticks once call is connected!)
   useEffect(() => {
-    if (!activeCall) {
-      setCallSeconds(0);
+    if (!activeCall || activeCall.status !== 'connected') {
+      if (!activeCall) setCallSeconds(0);
       return;
     }
     const timer = setInterval(() => {
@@ -727,7 +756,17 @@ export default function App() {
       addedParticipants: []
     });
 
-    // 1. Start WebRTC E2EE Audio/Video + WebSocket PCM Audio Relay
+    // 1. Start Android Native VoIPService (`AudioManager.MODE_IN_COMMUNICATION` + WakeLock + Foreground Call Service)
+    const win = window as any;
+    if (win.AndroidAudioBridge?.setCommunicationMode) {
+      try {
+        win.AndroidAudioBridge.setCommunicationMode(true);
+      } catch {
+        // ignore
+      }
+    }
+
+    // 2. Start WebRTC E2EE Audio/Video + WebSocket PCM Audio Relay
     peerCallWebRtcEngine
       .startOutgoingCall({
         sessionId,
@@ -745,7 +784,7 @@ export default function App() {
       })
       .catch(() => {});
 
-    // 2. Also ring the target user on Telegram (`phone.requestCall`)
+    // 3. Dispatch real `TLRPC.TL_phone_requestCall` with Diffie-Hellman `g_a_hash` to Telegram DC
     const realCallRes = await tdlibClientEngine.startRealCall({
       phone: phone.trim(),
       username,
@@ -758,8 +797,8 @@ export default function App() {
       prev
         ? {
             ...prev,
-            emojis: finalEmojis,
-            status: 'connected'
+            emojis: finalEmojis
+            // Status stays 'ringing' until the recipient answers (`phoneCallAccepted` / `call:answer`)!
           }
         : null
     );
